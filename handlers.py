@@ -1,0 +1,997 @@
+"""
+Módulo de handlers de Telegram para el bot de recordatorios.
+Centraliza toda la lógica de interacción con el usuario.
+"""
+
+import logging
+import locale
+from datetime import datetime
+from telegram import Update, InlineKeyboardButton, InlineKeyboardMarkup
+from telegram.ext import ContextTypes, ConversationHandler
+
+logger = logging.getLogger(__name__)
+
+# Estados para ConversationHandler
+EDITANDO_RECORDATORIO = 1
+ESPERANDO_HORA = 2
+
+
+class TelegramHandlers:
+    """Clase que agrupa todos los handlers del bot de Telegram."""
+    
+    def __init__(self, database_manager, gemini_service):
+        """
+        Inicializa los handlers.
+        
+        Args:
+            database_manager: Instancia de DatabaseManager
+            gemini_service: Instancia de GeminiService
+        """
+        self.db = database_manager
+        self.gemini = gemini_service
+        self._configure_locale()
+    
+    def _configure_locale(self):
+        """Configura el locale para fechas en español."""
+        try:
+            locale.setlocale(locale.LC_TIME, 'es_ES.UTF-8')
+        except locale.Error:
+            try:
+                locale.setlocale(locale.LC_TIME, 'Spanish_Spain.1252')
+            except locale.Error:
+                logger.warning("No se pudo setear el locale a Español")
+    
+    # ==================== COMANDOS PRINCIPALES ====================
+    
+    async def start(self, update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
+        """Comando /start. Da la bienvenida y muestra menú principal."""
+        user_name = update.message.from_user.first_name
+        
+        # Menú principal simplificado (sin editar/eliminar)
+        keyboard = [
+            [InlineKeyboardButton("📝 Crear Recordatorio", callback_data="menu_crear")],
+            [InlineKeyboardButton("📋 Ver Mis Recordatorios", callback_data="listar")],
+            [InlineKeyboardButton("❓ Ayuda", callback_data="new_help")],
+        ]
+        reply_markup = InlineKeyboardMarkup(keyboard)
+        
+        mensaje_bienvenida = (
+            f"👋 <b>¡Hola {user_name}!</b>\n\n"
+            "🤖 Soy tu <b>Bot de Recordatorios Inteligente</b>\n\n"
+            "💡 Puedo entender lenguaje natural y ayudarte a recordar "
+            "cualquier cosa que necesites.\n\n"
+            "<b>¿Qué querés hacer?</b>"
+        )
+        
+        await update.message.reply_html(
+            mensaje_bienvenida,
+            reply_markup=reply_markup
+        )
+    
+    async def menu(self, update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
+        """Comando /menu. Muestra el menú principal."""
+        keyboard = [
+            [InlineKeyboardButton("📝 Crear Recordatorio", callback_data="menu_crear")],
+            [InlineKeyboardButton("📋 Ver Mis Recordatorios", callback_data="listar")],
+            [InlineKeyboardButton("❓ Ayuda", callback_data="new_help")],
+        ]
+        reply_markup = InlineKeyboardMarkup(keyboard)
+        
+        await update.message.reply_html(
+            "🤖 <b>Menú Principal</b>\n\n"
+            "<b>¿Qué querés hacer?</b>",
+            reply_markup=reply_markup
+        )
+    
+    async def create_reminder(self, update: Update, context: ContextTypes.DEFAULT_TYPE) -> int:
+        """
+        Maneja cualquier mensaje de texto para CREAR recordatorio(s).
+        Soporta hasta 3 recordatorios en un solo mensaje.
+        Si falta la hora, pregunta al usuario.
+        
+        Returns:
+            int: Estado del ConversationHandler (ESPERANDO_HORA o ConversationHandler.END)
+        """
+        chat_id = update.message.chat_id
+        texto_usuario = update.message.text
+        username = update.message.from_user.username
+        
+        logger.info(f"Creando recordatorio(s) para {chat_id}: {texto_usuario}")
+        msg_temporal = await update.message.reply_text("Procesando tu solicitud...")
+        
+        # Parsear con Gemini (ahora soporta múltiples recordatorios)
+        recordatorios, error_msg = await self.gemini.parse_multiple_reminders(texto_usuario)
+        
+        if error_msg:
+            await context.bot.edit_message_text(
+                chat_id=chat_id, 
+                message_id=msg_temporal.message_id, 
+                text=error_msg
+            )
+            return ConversationHandler.END
+        
+        # Verificar si algún recordatorio no tiene hora
+        recordatorios_sin_hora = [r for r in recordatorios if not r.get('hora_especificada', True)]
+        
+        if recordatorios_sin_hora:
+            # Guardar en contexto para procesar después
+            context.user_data['recordatorios_pendientes'] = recordatorios
+            context.user_data['username'] = username
+            context.user_data['msg_temporal_id'] = msg_temporal.message_id
+            
+            # Preguntar hora para el primer recordatorio sin hora
+            primer_recordatorio = recordatorios_sin_hora[0]
+            
+            await context.bot.edit_message_text(
+                chat_id=chat_id,
+                message_id=msg_temporal.message_id,
+                text=f"📅 <b>Recordatorio:</b> {primer_recordatorio['tarea']}\n\n"
+                     f"📆 <b>Fecha:</b> {primer_recordatorio['fecha']}\n\n"
+                     f"⏰ <b>¿A qué hora querés que te recuerde?</b>\n\n"
+                     f"Ejemplo: 10:30, 15:00, 9am",
+                parse_mode="HTML"
+            )
+            
+            return ESPERANDO_HORA
+        
+        # Si todos tienen hora, crear los recordatorios directamente
+        await self._crear_multiples_recordatorios(
+            update, context, recordatorios, username, msg_temporal.message_id
+        )
+        
+        return ConversationHandler.END
+    
+    async def handle_hora_response(self, update: Update, context: ContextTypes.DEFAULT_TYPE) -> int:
+        """
+        Maneja la respuesta del usuario cuando se le pregunta la hora.
+        """
+        chat_id = update.message.chat_id
+        hora_texto = update.message.text.strip()
+        msg_temporal_id = context.user_data.get('msg_temporal_id')
+        
+        # Parsear hora con Gemini
+        hora_parseada = await self._parsear_hora(hora_texto)
+        
+        if not hora_parseada:
+            await update.message.reply_text(
+                "❌ No pude entender esa hora.\n\n"
+                "Por favor, escribí la hora en un formato como:\n"
+                "• 10:30\n"
+                "• 15:00\n"
+                "• 9am\n"
+                "• 14:45"
+            )
+            return ESPERANDO_HORA
+        
+        # Actualizar el primer recordatorio sin hora
+        recordatorios = context.user_data.get('recordatorios_pendientes', [])
+        username = context.user_data.get('username')
+        
+        for recordatorio in recordatorios:
+            if not recordatorio.get('hora_especificada', True):
+                recordatorio['hora'] = hora_parseada
+                recordatorio['hora_especificada'] = True
+                break
+        
+        # Verificar si quedan recordatorios sin hora
+        recordatorios_sin_hora = [r for r in recordatorios if not r.get('hora_especificada', True)]
+        
+        if recordatorios_sin_hora:
+            # Preguntar por el siguiente
+            siguiente = recordatorios_sin_hora[0]
+            await update.message.reply_text(
+                f"✅ ¡Perfecto!\n\n"
+                f"� <b>Siguiente recordatorio:</b> {siguiente['tarea']}\n\n"
+                f"� <b>Fecha:</b> {siguiente['fecha']}\n\n"
+                f"⏰ <b>¿A qué hora?</b>",
+                parse_mode="HTML"
+            )
+            return ESPERANDO_HORA
+        
+        # Todos tienen hora, crear los recordatorios
+        await self._crear_multiples_recordatorios(
+            update, context, recordatorios, username, msg_temporal_id
+        )
+        
+        # Limpiar contexto
+        context.user_data.clear()
+        
+        return ConversationHandler.END
+    
+    async def _parsear_hora(self, hora_texto: str) -> str:
+        """
+        Parsea un texto de hora usando Gemini.
+        
+        Args:
+            hora_texto: Texto con la hora (ej: "10am", "14:30", "3pm")
+        
+        Returns:
+            str: Hora en formato HH:MM:SS o None si no se pudo parsear
+        """
+        prompt = f"""
+Parsea esta hora al formato HH:MM:SS de 24 horas.
+
+Texto: "{hora_texto}"
+
+Ejemplos:
+- "10am" → "10:00:00"
+- "3pm" → "15:00:00"
+- "14:30" → "14:30:00"
+- "9" → "09:00:00"
+
+Responde SOLO con la hora en formato HH:MM:SS o "ERROR" si no podés entender.
+"""
+        
+        try:
+            response = await self.gemini.model.generate_content_async(prompt)
+            resultado = response.text.strip()
+            
+            # Validar formato HH:MM:SS
+            if len(resultado) == 8 and resultado[2] == ':' and resultado[5] == ':':
+                return resultado
+            
+            return None
+        
+        except Exception as e:
+            logger.error(f"Error parseando hora: {e}")
+            return None
+    
+    async def _crear_multiples_recordatorios(
+        self, 
+        update: Update, 
+        context: ContextTypes.DEFAULT_TYPE,
+        recordatorios: list,
+        username: str,
+        msg_temporal_id: int = None
+    ) -> None:
+        """
+        Crea múltiples recordatorios en la base de datos.
+        Incluye validaciones anti-flood y límites de seguridad.
+        
+        Args:
+            update: Update de Telegram
+            context: Contexto de Telegram
+            recordatorios: Lista de diccionarios con la info de cada recordatorio
+            username: Username del usuario
+            msg_temporal_id: ID del mensaje temporal a editar (opcional)
+        """
+        chat_id = update.effective_chat.id
+        
+        # ==================== VALIDACIONES ANTI-FLOOD ====================
+        
+        # 1. Límite de recordatorios activos totales por chat (máximo 200)
+        LIMITE_RECORDATORIOS_ACTIVOS = 200
+        activos_actuales = self.db.count_active_reminders(chat_id)
+        
+        if activos_actuales >= LIMITE_RECORDATORIOS_ACTIVOS:
+            keyboard = [[InlineKeyboardButton("« Volver al Menú", callback_data="menu_principal")]]
+            reply_markup = InlineKeyboardMarkup(keyboard)
+            mensaje = (
+                f"⚠️ <b>Límite alcanzado</b>\n\n"
+                f"Ya tenés {activos_actuales} recordatorios activos.\n"
+                f"Por favor, eliminá algunos antes de crear nuevos.\n\n"
+                f"📋 Usá /listar para ver tus recordatorios."
+            )
+            
+            if msg_temporal_id:
+                await context.bot.edit_message_text(
+                    chat_id=chat_id,
+                    message_id=msg_temporal_id,
+                    text=mensaje,
+                    parse_mode="HTML",
+                    reply_markup=reply_markup
+                )
+            else:
+                await update.message.reply_html(mensaje, reply_markup=reply_markup)
+            return
+        
+        # 2. Límite de creaciones por minuto (máximo 20 por minuto para prevenir spam)
+        LIMITE_POR_MINUTO = 20
+        creaciones_recientes = self.db.count_recent_creations(chat_id, minutes=1)
+        
+        if creaciones_recientes >= LIMITE_POR_MINUTO:
+            keyboard = [[InlineKeyboardButton("« Volver al Menú", callback_data="menu_principal")]]
+            reply_markup = InlineKeyboardMarkup(keyboard)
+            mensaje = (
+                f"⚠️ <b>Límite de velocidad</b>\n\n"
+                f"Estás creando recordatorios muy rápido.\n"
+                f"Por favor, esperá un minuto antes de continuar."
+            )
+            
+            if msg_temporal_id:
+                await context.bot.edit_message_text(
+                    chat_id=chat_id,
+                    message_id=msg_temporal_id,
+                    text=mensaje,
+                    parse_mode="HTML",
+                    reply_markup=reply_markup
+                )
+            else:
+                await update.message.reply_html(mensaje, reply_markup=reply_markup)
+            return
+        
+        # 3. Verificar que no se exceda el límite con los nuevos recordatorios
+        if activos_actuales + len(recordatorios) > LIMITE_RECORDATORIOS_ACTIVOS:
+            keyboard = [[InlineKeyboardButton("« Volver al Menú", callback_data="menu_principal")]]
+            reply_markup = InlineKeyboardMarkup(keyboard)
+            disponibles = LIMITE_RECORDATORIOS_ACTIVOS - activos_actuales
+            mensaje = (
+                f"⚠️ <b>Límite excedido</b>\n\n"
+                f"Solo podés crear {disponibles} recordatorios más.\n"
+                f"Actualmente tenés {activos_actuales} activos de {LIMITE_RECORDATORIOS_ACTIVOS} máximo."
+            )
+            
+            if msg_temporal_id:
+                await context.bot.edit_message_text(
+                    chat_id=chat_id,
+                    message_id=msg_temporal_id,
+                    text=mensaje,
+                    parse_mode="HTML",
+                    reply_markup=reply_markup
+                )
+            else:
+                await update.message.reply_html(mensaje, reply_markup=reply_markup)
+            return
+        
+        # ==================== CREAR RECORDATORIOS ====================
+        
+        creados = []
+        errores = []
+        
+        for recordatorio in recordatorios:
+            try:
+                # Combinar fecha y hora
+                fecha_str = recordatorio.get('fecha')
+                hora_str = recordatorio.get('hora', '00:00:00')
+                
+                # Si no hay fecha (solo tiene fecha_hora ya combinada)
+                if not fecha_str and recordatorio.get('fecha_hora'):
+                    fecha_hora_str = recordatorio['fecha_hora']
+                    fecha_hora_obj = datetime.strptime(fecha_hora_str, '%Y-%m-%d %H:%M:%S')
+                else:
+                    fecha_hora_str = f"{fecha_str} {hora_str}"
+                    fecha_hora_obj = datetime.strptime(fecha_hora_str, '%Y-%m-%d %H:%M:%S')
+                
+                # Verificar si es recurrente
+                if recordatorio.get('es_recurrente'):
+                    tipo_rec = recordatorio.get('tipo_recurrencia')
+                    intervalo_rec = recordatorio.get('intervalo_recurrencia') or recordatorio.get('intervalo', 1)
+                    
+                    # VALIDAR INTERVALO DE RECURRENCIA
+                    es_valido, error_validacion = self.db.validate_recurrence_interval(tipo_rec, intervalo_rec)
+                    
+                    if not es_valido:
+                        errores.append(f"{recordatorio['tarea']}: {error_validacion}")
+                        logger.warning(f"Intervalo inválido: {error_validacion}")
+                        continue
+                    
+                    # Crear recurrence_data completo para recordatorio recurrente
+                    recurrence_data = {
+                        'contexto_original': recordatorio.get('contexto_original') or recordatorio.get('contexto', recordatorio['tarea']),
+                        'es_recurrente': True,
+                        'tipo_recurrencia': tipo_rec,
+                        'intervalo_recurrencia': intervalo_rec,
+                        'dias_semana': recordatorio.get('dias_semana'),
+                        'fecha_fin_recurrencia': recordatorio.get('fecha_fin_recurrencia') or recordatorio.get('fecha_fin')
+                    }
+                else:
+                    # Recordatorio único, solo contexto
+                    recurrence_data = {
+                        'contexto_original': recordatorio.get('contexto_original') or recordatorio.get('contexto', recordatorio['tarea']),
+                        'es_recurrente': False,
+                        'tipo_recurrencia': None,
+                        'intervalo_recurrencia': None,
+                        'dias_semana': None,
+                        'fecha_fin_recurrencia': None
+                    }
+                
+                # Guardar en base de datos
+                nuevo_id = self.db.create_reminder(
+                    chat_id, 
+                    recordatorio['tarea'], 
+                    fecha_hora_obj, 
+                    recurrence_data,
+                    username
+                )
+                
+                creados.append({
+                    'id': nuevo_id,
+                    'tarea': recordatorio['tarea'],
+                    'fecha_hora': fecha_hora_obj,
+                    'es_recurrente': recordatorio.get('es_recurrente', False),
+                    'tipo_recurrencia': recordatorio.get('tipo_recurrencia')
+                })
+            
+            except Exception as e:
+                logger.error(f"Error creando recordatorio: {e}")
+                errores.append(recordatorio['tarea'])
+        
+        # Construir mensaje de confirmación
+        keyboard = [[InlineKeyboardButton("« Volver al Menú", callback_data="menu_principal")]]
+        reply_markup = InlineKeyboardMarkup(keyboard)
+        
+        if not creados:
+            mensaje = "❌ <b>No se pudo crear ningún recordatorio</b>\n\n"
+            if errores:
+                mensaje += "Hubo problemas con:\n"
+                for error in errores:
+                    mensaje += f"• {error}\n"
+        
+        elif len(creados) == 1:
+            # Un solo recordatorio
+            r = creados[0]
+            if r.get('es_recurrente'):
+                tipo_texto = {
+                    'diario': 'diariamente',
+                    'semanal': 'semanalmente',
+                    'mensual': 'mensualmente',
+                    'anual': 'anualmente'
+                }.get(r.get('tipo_recurrencia'), 'periódicamente')
+                
+                mensaje = (
+                    f"✅ <b>¡Recordatorio recurrente agendado!</b>\n\n"
+                    f"📌 <i>{r['tarea']}</i>\n\n"
+                    f"🔄 <b>Se repetirá {tipo_texto}</b>\n"
+                    f"📅 <b>Primera vez:</b> {r['fecha_hora'].strftime('%A %d de %B a las %H:%M hs')}\n\n"
+                    f"💡 Usá /listar para ver todos tus recordatorios"
+                )
+            else:
+                mensaje = (
+                    f"✅ <b>¡Recordatorio agendado!</b>\n\n"
+                    f"📌 <i>{r['tarea']}</i>\n\n"
+                    f"📅 {r['fecha_hora'].strftime('%A %d de %B a las %H:%M hs')}\n\n"
+                    f"💡 Usá /listar para ver todos tus recordatorios"
+                )
+        
+        else:
+            # Múltiples recordatorios
+            mensaje = f"✅ <b>¡{len(creados)} recordatorios agendados!</b>\n\n"
+            
+            for r in creados:
+                mensaje += f"📌 <i>{r['tarea']}</i>\n"
+                mensaje += f"📅 {r['fecha_hora'].strftime('%A %d de %B - %H:%M hs')}\n"
+                mensaje += "─────────────────────\n"
+            
+            mensaje += "\n💡 Usá /listar para ver todos tus recordatorios"
+            
+            if errores:
+                mensaje += "\n\n⚠️ No se pudieron crear:\n"
+                for error in errores:
+                    mensaje += f"• {error}\n"
+        
+        # Enviar o editar mensaje
+        if msg_temporal_id:
+            await context.bot.edit_message_text(
+                chat_id=chat_id,
+                message_id=msg_temporal_id,
+                text=mensaje,
+                parse_mode="HTML",
+                reply_markup=reply_markup
+            )
+        else:
+            # Si no hay mensaje temporal, usar el mensaje del update
+            message = update.callback_query.message if update.callback_query else update.message
+            await message.reply_html(mensaje, reply_markup=reply_markup)
+    
+    async def list_reminders(self, update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
+        """Comando /listar. Muestra solo los recordatorios en curso (futuros)."""
+        chat_id = update.effective_chat.id
+        
+        # Determinar si viene de callback o mensaje
+        is_callback = update.callback_query is not None
+        message = update.callback_query.message if is_callback else update.message
+        
+        try:
+            upcoming_jobs = self.db.get_upcoming_reminders(chat_id)
+            
+            if not upcoming_jobs:
+                keyboard = [[InlineKeyboardButton("« Volver al Menú", callback_data="menu_principal")]]
+                reply_markup = InlineKeyboardMarkup(keyboard)
+                mensaje = (
+                    "📭 No tenés recordatorios para esta semana.\n\n"
+                    "💡 <i>Tip: El listado muestra solo los próximos 7 días</i>\n\n"
+                    "¡Creá uno escribiendo qué querés recordar!"
+                )
+                
+                if is_callback:
+                    # Si viene de callback, editar el mensaje existente
+                    await update.callback_query.edit_message_text(
+                        mensaje,
+                        parse_mode="HTML",
+                        reply_markup=reply_markup
+                    )
+                else:
+                    # Si viene de comando, crear nuevo mensaje
+                    await message.reply_html(mensaje, reply_markup=reply_markup)
+                return
+            
+            keyboard = []
+            message_text = (
+                f"📋 <b>Recordatorios de esta semana ({len(upcoming_jobs)}):</b>\n"
+                f"<i>Mostrando próximos 7 días</i>\n\n"
+            )
+            
+            # Mostrar solo recordatorios en curso (futuros)
+            for job_id, tarea, fecha_hora in upcoming_jobs:
+                # Truncar tarea para mostrar en botón
+                tarea_corta = (tarea[:30] + '...') if len(tarea) > 30 else tarea
+                message_text += f"📌 <b>{tarea}</b>\n"
+                message_text += f"📅 {fecha_hora.strftime('%A %d de %B - %H:%M hs')}\n"
+                
+                keyboard.append([
+                    InlineKeyboardButton(f"✏️ {tarea_corta}", callback_data=f"edit:{job_id}"),
+                    InlineKeyboardButton("🗑️", callback_data=f"del:{job_id}")
+                ])
+                message_text += "─────────────────────\n"
+            
+            keyboard.append([InlineKeyboardButton("« Volver al Menú", callback_data="menu_principal")])
+            
+            reply_markup = InlineKeyboardMarkup(keyboard)
+            
+            if is_callback:
+                # Si viene de callback, editar el mensaje existente
+                await update.callback_query.edit_message_text(
+                    message_text,
+                    parse_mode="HTML",
+                    reply_markup=reply_markup
+                )
+            else:
+                # Si viene de comando, crear nuevo mensaje
+                await message.reply_html(message_text, reply_markup=reply_markup)
+        
+        except Exception as e:
+            logger.error(f"Error listando recordatorios: {e}")
+            await message.reply_text("Error al consultar tus recordatorios.")
+
+    async def delete_reminder(self, update: Update, context: ContextTypes.DEFAULT_TYPE, job_id_from_button: int = None, confirmed: bool = False) -> None:
+        """Elimina un recordatorio (llamado desde un botón) con confirmación."""
+        chat_id = update.effective_chat.id
+        username = update.effective_user.username if update.effective_user else None
+        
+        try:
+            job_id = job_id_from_button
+            
+            if not job_id:
+                await update.message.reply_text(
+                    "Para eliminar un recordatorio, usá los botones desde /listar\n\n"
+                    "O presioná el botón 🗑️ junto al recordatorio que querés borrar."
+                )
+                return
+        
+        except (ValueError, TypeError):
+            await update.message.reply_text("Ocurrió un error.")
+            return
+        except AttributeError:
+            pass
+        
+        try:
+            # Obtener info del recordatorio antes de borrar
+            job = self.db.get_reminder_by_id(job_id, chat_id)
+            
+            if not job:
+                if update.callback_query:
+                    await update.callback_query.answer("Este recordatorio ya no existe", show_alert=True)
+                    # Actualizar la lista
+                    await self.list_reminders(update, context)
+                else:
+                    await update.message.reply_text("No encontré ese recordatorio (quizás ya fue borrado).")
+                return
+            
+            tarea, fecha_hora, contexto_original = job
+            
+            # Si no está confirmado, pedir confirmación
+            if not confirmed:
+                tarea_corta = (tarea[:50] + '...') if len(tarea) > 50 else tarea
+                keyboard = [
+                    [InlineKeyboardButton("✅ Sí, eliminar", callback_data=f"delconfirm:{job_id}")],
+                    [InlineKeyboardButton("❌ Cancelar", callback_data="delcancel")],
+                ]
+                reply_markup = InlineKeyboardMarkup(keyboard)
+                
+                mensaje_confirmacion = (
+                    f"⚠️ <b>¿Confirmar eliminación?</b>\n\n"
+                    f"📌 <i>{tarea_corta}</i>\n"
+                    f"📅 {fecha_hora.strftime('%d/%m/%Y - %H:%M hs')}"
+                )
+                
+                if update.callback_query:
+                    await update.callback_query.answer()
+                    # Editar el mensaje de la lista para mostrar confirmación
+                    await update.callback_query.edit_message_text(
+                        mensaje_confirmacion,
+                        parse_mode="HTML",
+                        reply_markup=reply_markup
+                    )
+                return
+            
+            # Si está confirmado, proceder con la eliminación
+            deleted = self.db.delete_reminder(job_id, chat_id, username)
+            
+            if deleted:
+                tarea_corta = (tarea[:40] + '...') if len(tarea) > 40 else tarea
+                
+                if update.callback_query:
+                    await update.callback_query.answer("✅ Eliminado", show_alert=True)
+                    # Actualizar la lista automáticamente (esto refresca la vista)
+                    await self.list_reminders(update, context)
+                else:
+                    keyboard = [[InlineKeyboardButton("« Volver al Menú", callback_data="menu_principal")]]
+                    reply_markup = InlineKeyboardMarkup(keyboard)
+                    message_to_send = f"✅ <b>Recordatorio eliminado:</b>\n<i>{tarea_corta}</i>"
+                    await update.message.reply_html(message_to_send, reply_markup=reply_markup)
+        
+        except Exception as e:
+            logger.error(f"Error borrando recordatorio: {e}")
+            if update.callback_query:
+                await update.callback_query.message.reply_text("Hubo un error al intentar borrar.")
+            else:
+                await update.message.reply_text("Hubo un error al intentar borrar.")
+    
+    async def delete_all_reminders(self, update: Update, context: ContextTypes.DEFAULT_TYPE, confirmed: bool = False) -> None:
+        """Comando /eliminar. Pide confirmación con botones."""
+        chat_id = update.effective_chat.id
+        message = update.message or update.callback_query.message
+        username = update.effective_user.username if update.effective_user else None
+        
+        if not confirmed:
+            keyboard = [
+                [InlineKeyboardButton("Sí, eliminar todo", callback_data="delall_confirm")],
+                [InlineKeyboardButton("No, cancelar", callback_data="delall_cancel")],
+            ]
+            reply_markup = InlineKeyboardMarkup(keyboard)
+            await message.reply_text(
+                "⚠️ ¿Estás seguro de que querés borrar TODOS tus recordatorios pendientes?", 
+                reply_markup=reply_markup
+            )
+            return
+        
+        try:
+            count = self.db.delete_all_reminders(chat_id, username)
+            
+            keyboard = [[InlineKeyboardButton("« Volver al Menú", callback_data="menu_principal")]]
+            reply_markup = InlineKeyboardMarkup(keyboard)
+            
+            if update.callback_query:
+                if count == 0:
+                    await update.callback_query.edit_message_text(
+                        "No tenías recordatorios pendientes para borrar.",
+                        reply_markup=reply_markup
+                    )
+                else:
+                    await update.callback_query.edit_message_text(
+                        f"¡Listo! Borré {count} recordatorios pendientes.",
+                        reply_markup=reply_markup
+                    )
+        
+        except Exception as e:
+            logger.error(f"Error eliminando todos los recordatorios: {e}")
+            keyboard = [[InlineKeyboardButton("« Volver al Menú", callback_data="menu_principal")]]
+            reply_markup = InlineKeyboardMarkup(keyboard)
+            if update.callback_query:
+                await update.callback_query.edit_message_text(
+                    "Hubo un error al intentar borrar todo.",
+                    reply_markup=reply_markup
+                )
+    
+    # ==================== EDICIÓN DE RECORDATORIOS ====================
+    
+    async def _iniciar_edicion(self, chat_id: int, job_id: int, context: ContextTypes.DEFAULT_TYPE) -> tuple:
+        """Helper interno para iniciar la edición."""
+        try:
+            job = self.db.get_reminder_by_id(job_id, chat_id)
+            
+            if not job:
+                mensaje = "No encontré ese recordatorio (quizás ya fue borrado)."
+                return False, mensaje, None
+            
+            tarea, fecha_hora, contexto_original = job
+            
+            # Verificar que sea un recordatorio futuro
+            if fecha_hora <= datetime.now():
+                mensaje = (
+                    "⚠️ <b>No se puede editar este recordatorio</b>\n\n"
+                    "Solo podés editar recordatorios que aún no hayan vencido.\n\n"
+                    "Este recordatorio ya pasó su fecha y hora programada."
+                )
+                return False, mensaje, None
+            
+            # Guardar los datos originales para el contexto
+            context.user_data['job_to_edit'] = job_id
+            context.user_data['job_original_tarea'] = tarea
+            context.user_data['job_original_fecha'] = fecha_hora
+            context.user_data['job_original_contexto'] = contexto_original
+            
+            keyboard = [[InlineKeyboardButton("❌ Cancelar edición", callback_data="cancel_edit")]]
+            reply_markup = InlineKeyboardMarkup(keyboard)
+            
+            mensaje = (
+                f"✏️ <b>Editando recordatorio:</b>\n"
+                f"<i>'{tarea}'</i>\n"
+                f"📅 {fecha_hora.strftime('%A %d de %B a las %H:%M hs')}\n\n"
+                f"💬 <b>Escribí qué querés cambiar</b>\n\n"
+                f"Podés hacer cambios incrementales:\n"
+                f"• <i>El examen era el martes no el lunes</i>\n"
+                f"• <i>Mejor a las 15 en vez de las 18</i>\n"
+                f"• <i>Cambiar a comprar pan en vez de leche</i>\n\n"
+                f"O reescribir todo:\n"
+                f"• <i>Comprar pan mañana a las 10</i>"
+            )
+            return True, mensaje, reply_markup
+        
+        except Exception as e:
+            logger.error(f"Error iniciando edición: {e}")
+            return False, "Error al buscar el recordatorio.", None
+    
+    async def edit_reminder_start(self, update: Update, context: ContextTypes.DEFAULT_TYPE) -> int:
+        """Ya no se usa comando /editar con ID, solo botones."""
+        await update.message.reply_html(
+            "✏️ <b>Para editar un recordatorio:</b>\n\n"
+            "1️⃣ Usa el comando /listar\n"
+            "2️⃣ Presioná el botón ✏️ del recordatorio que querés editar\n\n"
+            "💡 Solo podés editar recordatorios que aún no hayan vencido."
+        )
+        return ConversationHandler.END
+    
+    async def edit_reminder_start_button(self, update: Update, context: ContextTypes.DEFAULT_TYPE) -> int:
+        """Inicia la edición desde un botón."""
+        query = update.callback_query
+        await query.answer()
+        
+        chat_id = query.message.chat_id
+        job_id = int(query.data.split(":")[1])
+        
+        success, mensaje, reply_markup = await self._iniciar_edicion(chat_id, job_id, context)
+        await query.message.reply_html(mensaje, reply_markup=reply_markup)
+        
+        return EDITANDO_RECORDATORIO if success else ConversationHandler.END
+    
+    async def handle_edit_response(self, update: Update, context: ContextTypes.DEFAULT_TYPE) -> int:
+        """Procesa la respuesta del usuario con los nuevos datos."""
+        chat_id = update.message.chat_id
+        texto_usuario = update.message.text
+        
+        # Recuperar datos originales
+        old_job_id = context.user_data.pop('job_to_edit', None)
+        tarea_original = context.user_data.pop('job_original_tarea', None)
+        fecha_original = context.user_data.pop('job_original_fecha', None)
+        contexto_original = context.user_data.pop('job_original_contexto', None)
+        
+        if not old_job_id or not tarea_original or not fecha_original:
+            await update.message.reply_text("Ocurrió un error. Usá /listar y presioná el botón ✏️")
+            return ConversationHandler.END
+        
+        msg_temporal = await update.message.reply_text("Procesando tu edición...")
+        
+        # Parsear usando el nuevo método con contexto
+        tarea, fecha_hora_obj, error_msg, recurrence_data = await self.gemini.parse_reminder_edit(
+            texto_usuario, 
+            tarea_original, 
+            fecha_original,
+            contexto_original
+        )
+        
+        if error_msg:
+            await context.bot.edit_message_text(
+                chat_id=chat_id, 
+                message_id=msg_temporal.message_id, 
+                text=error_msg
+            )
+            return EDITANDO_RECORDATORIO
+        
+        # Validar que la nueva fecha sea futura (solo si no es recurrente)
+        es_recurrente = recurrence_data and recurrence_data.get('tipo')
+        if not es_recurrente and fecha_hora_obj <= datetime.now():
+            await context.bot.edit_message_text(
+                chat_id=chat_id, 
+                message_id=msg_temporal.message_id,
+                text="⚠️ La nueva fecha debe ser en el futuro. Intentá de nuevo con una fecha futura.",
+                parse_mode="HTML"
+            )
+            return EDITANDO_RECORDATORIO
+        
+        try:
+            # Extraer nuevo contexto
+            nuevo_contexto = recurrence_data.get('contexto_original') if recurrence_data else None
+            
+            # Actualizar con el nuevo contexto
+            self.db.update_reminder(old_job_id, chat_id, tarea, fecha_hora_obj, nuevo_contexto)
+            
+            keyboard = [[InlineKeyboardButton("« Volver al Menú", callback_data="menu_principal")]]
+            reply_markup = InlineKeyboardMarkup(keyboard)
+            
+            mensaje_confirmacion = (
+                f"✅ <b>Recordatorio actualizado!</b>\n\n"
+                f"📌 <b>Nuevo recordatorio:</b>\n"
+                f"<i>'{tarea}'</i>\n\n"
+                f"📅 <b>Nueva fecha:</b>\n{fecha_hora_obj.strftime('%A %d de %B a las %H:%M hs')}"
+            )
+            await context.bot.edit_message_text(
+                chat_id=chat_id, 
+                message_id=msg_temporal.message_id,
+                text=mensaje_confirmacion, 
+                parse_mode="HTML",
+                reply_markup=reply_markup
+            )
+        
+        except Exception as e:
+            logger.error(f"Error actualizando recordatorio: {e}")
+            keyboard = [[InlineKeyboardButton("« Volver al Menú", callback_data="menu_principal")]]
+            reply_markup = InlineKeyboardMarkup(keyboard)
+            await context.bot.edit_message_text(
+                chat_id=chat_id, 
+                message_id=msg_temporal.message_id,
+                text="Error al actualizar en la base de datos.",
+                reply_markup=reply_markup
+            )
+        
+        return ConversationHandler.END
+    
+    async def cancel_edit(self, update: Update, context: ContextTypes.DEFAULT_TYPE) -> int:
+        """Comando /cancelar o botón de 'Cancelar'."""
+        if 'job_to_edit' in context.user_data:
+            context.user_data.pop('job_to_edit')
+        
+        logger.info(f"Usuario {update.effective_chat.id} canceló la edición")
+        
+        keyboard = [[InlineKeyboardButton("« Volver al Menú", callback_data="menu_principal")]]
+        reply_markup = InlineKeyboardMarkup(keyboard)
+        
+        if update.callback_query:
+            await update.callback_query.edit_message_text(
+                "Edición cancelada. No se hicieron cambios.",
+                reply_markup=reply_markup
+            )
+        else:
+            await update.message.reply_text(
+                "Edición cancelada. No se hicieron cambios.",
+                reply_markup=reply_markup
+            )
+        
+        return ConversationHandler.END
+    
+    # ==================== CALLBACKS DE BOTONES ====================
+    
+    async def handle_callback_query(self, update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
+        """Maneja TODAS las pulsaciones de botones."""
+        query = update.callback_query
+        await query.answer()
+        
+        data = query.data
+        logger.info(f"Callback recibido: {data}")
+        
+        if data.startswith("del:"):
+            job_id = int(data.split(":")[1])
+            await self.delete_reminder(update, context, job_id_from_button=job_id, confirmed=False)
+        
+        elif data.startswith("delconfirm:"):
+            job_id = int(data.split(":")[1])
+            await self.delete_reminder(update, context, job_id_from_button=job_id, confirmed=True)
+        
+        elif data == "delcancel":
+            # Cancelar eliminación y volver a mostrar la lista
+            await self.list_reminders(update, context)
+        
+        elif data == "listar":
+            await self.list_reminders(update, context)
+        
+        elif data == "menu_crear":
+            # Mostrar instrucciones para crear recordatorio
+            keyboard = [[InlineKeyboardButton("« Volver al Menú", callback_data="menu_principal")]]
+            reply_markup = InlineKeyboardMarkup(keyboard)
+            
+            await query.message.reply_html(
+                "📝 <b>Crear un Recordatorio</b>\n\n"
+                "Es muy fácil! Simplemente escribime qué querés recordar y cuándo.\n\n"
+                "🌟 <b>Ejemplos:</b>\n"
+                "• <i>Recordame pagar la luz mañana a las 10</i>\n"
+                "• <i>Llamar al dentista el viernes a las 15:30</i>\n"
+                "• <i>Comprar pan en 20 minutos</i>\n"
+                "• <i>Reunión con el equipo el lunes 10 a las 9</i>\n\n"
+                "💬 Escribí tu recordatorio ahora:",
+                reply_markup=reply_markup
+            )
+        
+        elif data == "menu_editar":
+            # Mostrar instrucciones para editar
+            keyboard = [[InlineKeyboardButton("« Volver al Menú", callback_data="menu_principal")]]
+            reply_markup = InlineKeyboardMarkup(keyboard)
+            
+            await query.message.reply_html(
+                "✏️ <b>Editar un Recordatorio</b>\n\n"
+                "Para editar un recordatorio:\n\n"
+                "1️⃣ Usa el comando /listar o el botón 'Ver Mis Recordatorios'\n"
+                "2️⃣ Presioná el botón ✏️ junto al recordatorio\n"
+                "3️⃣ Escribí el nuevo texto y fecha\n\n"
+                "⚠️ <b>Importante:</b> Solo podés editar recordatorios que aún no hayan vencido (en curso).",
+                reply_markup=reply_markup
+            )
+        
+        elif data == "menu_eliminar":
+            # Mostrar opciones de eliminación
+            keyboard = [
+                [InlineKeyboardButton("🗑️ Eliminar uno específico", callback_data="help_borrar")],
+                [InlineKeyboardButton("⚠️ Eliminar TODOS", callback_data="confirm_eliminar")],
+                [InlineKeyboardButton("« Volver al Menú", callback_data="menu_principal")]
+            ]
+            reply_markup = InlineKeyboardMarkup(keyboard)
+            
+            await query.message.reply_html(
+                "🗑️ <b>Eliminar Recordatorios</b>\n\n"
+                "¿Qué querés hacer?",
+                reply_markup=reply_markup
+            )
+        
+        elif data == "help_borrar":
+            # Instrucciones para borrar un recordatorio específico
+            keyboard = [[InlineKeyboardButton("« Volver", callback_data="menu_eliminar")]]
+            reply_markup = InlineKeyboardMarkup(keyboard)
+            
+            await query.message.reply_html(
+                "🗑️ <b>Eliminar un Recordatorio</b>\n\n"
+                "Para eliminar un recordatorio específico:\n\n"
+                "1️⃣ Usa el comando /listar o el botón 'Ver Mis Recordatorios'\n"
+                "2️⃣ Presioná el botón 🗑️ junto al recordatorio que querés borrar\n"
+                "3️⃣ Confirmá la eliminación\n\n"
+                "¡Es muy simple! Solo presioná el botón.",
+                reply_markup=reply_markup
+            )
+        
+        elif data == "confirm_eliminar":
+            # Redirigir a delete_all_reminders
+            await self.delete_all_reminders(update, context, confirmed=False)
+        
+        elif data == "menu_principal":
+            # Mostrar el menú principal simplificado (sin editar/eliminar)
+            keyboard = [
+                [InlineKeyboardButton("📝 Crear Recordatorio", callback_data="menu_crear")],
+                [InlineKeyboardButton("📋 Ver Mis Recordatorios", callback_data="listar")],
+                [InlineKeyboardButton("❓ Ayuda", callback_data="new_help")],
+            ]
+            reply_markup = InlineKeyboardMarkup(keyboard)
+            
+            await query.edit_message_text(
+                "🤖 <b>Menú Principal</b>\n\n"
+                "<b>¿Qué querés hacer?</b>",
+                parse_mode="HTML",
+                reply_markup=reply_markup
+            )
+        
+        elif data == "new_help":
+            # Ayuda general mejorada
+            keyboard = [[InlineKeyboardButton("« Volver al Menú", callback_data="menu_principal")]]
+            reply_markup = InlineKeyboardMarkup(keyboard)
+            
+            await query.message.reply_html(
+                "❓ <b>Ayuda - Bot de Recordatorios</b>\n\n"
+                "<b>📋 Comandos Disponibles:</b>\n"
+                "• <code>/start</code> - Mostrar menú principal\n"
+                "• <code>/menu</code> - Mostrar menú\n"
+                "• <code>/listar</code> - Ver tus recordatorios\n"
+                "• <code>/eliminar</code> - Eliminar todos\n"
+                "• <code>/cancelar</code> - Cancelar edición\n\n"
+                "<b>💡 Cómo Funciona:</b>\n"
+                "Solo escribí en lenguaje natural qué querés recordar y cuándo.\n\n"
+                "<b>🌟 Ejemplos de Recordatorios:</b>\n"
+                "• <i>Pagar el alquiler el 5 a las 10</i>\n"
+                "• <i>Comprar regalo para mamá mañana</i>\n"
+                "• <i>Llamar al médico el viernes a las 3 pm</i>\n"
+                "• <i>Recordame todos los lunes a las 9 revisar emails</i>\n\n"
+                "<b>🔄 Recordatorios Recurrentes:</b>\n"
+                "Podés crear recordatorios que se repiten:\n"
+                "• <i>Todos los días...</i> (diario)\n"
+                "• <i>Todos los lunes...</i> (semanal)\n"
+                "• <i>Cada primer día del mes...</i> (mensual)\n"
+                "• <i>Cada año el 15 de marzo...</i> (anual)\n\n"
+                "<b>✏️ Editar y Borrar:</b>\n"
+                "Desde <b>Ver Mis Recordatorios</b> podés:\n"
+                "• Presionar ✏️ para editar un recordatorio\n"
+                "• Presionar 🗑️ para eliminarlo (con confirmación)\n\n"
+                "¡Es así de simple! 😊",
+                reply_markup=reply_markup
+            )
+        
+        elif data == "delall_confirm":
+            await self.delete_all_reminders(update, context, confirmed=True)
+        
+        elif data == "delall_cancel":
+            await query.edit_message_text("Operación cancelada. No se borró nada.")

@@ -1,0 +1,14 @@
+# Bot de Recordatorios - Dependencias
+# Python >= 3.8
+
+# Telegram Bot API
+python-telegram-bot>=20.0
+
+# Google Generative AI (Gemini)
+google-generativeai>=0.3.0
+
+# MySQL Database Connector
+mysql-connector-python>=8.0.0
+
+# Environment Variables
+python-dotenv>=1.0.0
