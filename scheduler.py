@@ -121,23 +121,29 @@ class ReminderScheduler:
             contexto_original: Texto original del usuario (opcional)
         """
         try:
-            # Crear loop para operaciones asíncronas
-            loop = asyncio.new_event_loop()
-            asyncio.set_event_loop(loop)
+            # Crear un único loop para todas las operaciones asíncronas
+            async def generar_contenido():
+                """Genera contexto y mensaje gracioso en paralelo."""
+                contexto_limpio = ""
+                
+                # Extraer contexto inteligente usando Gemini (si existe contexto original)
+                if contexto_original and contexto_original.strip().lower() != tarea.strip().lower():
+                    try:
+                        contexto_limpio = await self.gemini.extract_smart_context(contexto_original, tarea)
+                    except Exception as e:
+                        logger.warning(f"Error extrayendo contexto: {e}")
+                
+                # Generar mensaje con humor usando Gemini
+                try:
+                    funny_msg = await self.gemini.generate_funny_reminder_message(tarea, contexto_original)
+                except Exception as e:
+                    logger.warning(f"Error generando mensaje gracioso: {e}")
+                    funny_msg = "⏰ ¡Es hora! Dale que vos podés 💪"
+                
+                return contexto_limpio, funny_msg
             
-            # Extraer contexto inteligente usando Gemini (si existe contexto original)
-            contexto_limpio = ""
-            if contexto_original and contexto_original.strip().lower() != tarea.strip().lower():
-                contexto_limpio = loop.run_until_complete(
-                    self.gemini.extract_smart_context(contexto_original, tarea)
-                )
-            
-            # Generar mensaje con humor usando Gemini
-            funny_msg = loop.run_until_complete(
-                self.gemini.generate_funny_reminder_message(tarea, contexto_original)
-            )
-            
-            loop.close()
+            # Ejecutar la generación de contenido
+            contexto_limpio, funny_msg = asyncio.run(generar_contenido())
             
             # Construir mensaje
             mensaje = f"🔔 ¡RECORDATORIO! 🔔\n\n"
@@ -153,7 +159,7 @@ class ReminderScheduler:
             keyboard = [[InlineKeyboardButton("« Volver al Menú", callback_data="menu_principal")]]
             reply_markup = InlineKeyboardMarkup(keyboard)
             
-            # Ejecutar el envío asíncrono en el loop
+            # Enviar el mensaje
             asyncio.run(self.bot.send_message(
                 chat_id=chat_id, 
                 text=mensaje, 
@@ -161,8 +167,9 @@ class ReminderScheduler:
                 reply_markup=reply_markup
             ))
             logger.info(f"Recordatorio {reminder_id} enviado a {chat_id}")
+            
         except Exception as e:
-            logger.error(f"Error enviando recordatorio {reminder_id}: {e}")
+            logger.error(f"Error enviando recordatorio {reminder_id}: {e}", exc_info=True)
             # Fallback: enviar sin mensaje de humor ni formato HTML
             mensaje = f"🔔 ¡RECORDATORIO! 🔔\n\n📌 {tarea}"
             
