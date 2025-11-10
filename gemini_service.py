@@ -70,7 +70,7 @@ Texto del usuario: "{texto_usuario}"
 
 RESPONDE UN JSON con LOS SIGUIENTES CAMPOS (exactamente con estos nombres):
 
-- tarea: Texto completo y detallado del recordatorio (string)
+- tarea: Texto del recordatorio EN INFINITIVO (ej: "comprar pan", "estudiar para examen", "llamar al médico") (string)
 - fecha_hora: Fecha y hora en formato 'YYYY-MM-DD HH:MM:SS' (string) — primera ocurrencia
 - contexto_original: Texto original completo del usuario (string)
 - es_recurrente: true o false (boolean)
@@ -84,6 +84,7 @@ version, recordatorio_original_id, es_version_actual, eliminado, fecha_eliminaci
 usuario_eliminacion, fecha_creacion, fecha_modificacion, ultima_ejecucion
 
 IMPORTANTE:
+- TODAS las tareas deben estar EN INFINITIVO (ej: "debo comprar pan" → "comprar pan", "tengo que estudiar" → "estudiar")
 - Si detectás un recordatorio recurrente (ej. "cada 4 horas", "todos los lunes"),
   devolvé es_recurrente=true y completá los campos de recurrencia.
 - Si no hay hora específica, poné la hora por defecto '00:00:00' en fecha_hora
@@ -219,18 +220,21 @@ Recordatorio: "{tarea}"
 {f'Contexto original del usuario: "{contexto_original}"' if contexto_original else ''}
 
 IMPORTANTE:
-- El mensaje DEBE estar ESTRICTAMENTE relacionado con el contenido del recordatorio
+- El mensaje DEBE estar ESTRICTAMENTE relacionado con el contenido del recordatorio Y su contexto
+- Si hay contexto adicional (ej: "para el examen de química"), úsalo para hacer el mensaje más específico
 - Debe ser simpático, divertido, y un poco picarón (pero sin pasarse)
 - Debe motivar, hacer reír o reflexionar
 - Usa emojis relacionados al tema
 - Máximo 20 palabras
 - NO uses comillas en la respuesta
+- NO repitas información que ya está en el recordatorio principal
 
 Ejemplos de buen estilo:
 - Para "pagar la luz": "💸 Tu billetera llora, pero tus electrodomésticos te lo van a agradecer 😅"
 - Para "ir al gym": "💪 Hoy no hay excusas! El sofá puede esperar (aunque te llame) 🛋️"
-- Para "estudiar para examen": "📚 Acordate: no estudiaste todo el año, pero AHORA sí o sí! Dale campeón 💪"
-- Para "comprar regalo cumpleaños": "🎁 Amazon Prime es tu mejor amigo. La procrastinación, tu peor enemigo 😂"
+- Para "estudiar" con contexto "para el examen de química": "📚 Los átomos no se van a memorizar solos! Dale campeón 🧪"
+- Para "comprar regalo" con contexto "cumpleaños de mamá": "🎁 Nada de última hora, que mamá se merece lo mejor! 💝"
+- Para "llamar al dentista": "🦷 Tu sonrisa te va a agradecer. No lo sigas postergando! �"
 
 Responde SOLO con el mensaje, sin formato extra ni explicaciones.
 """
@@ -272,7 +276,7 @@ RECURRENTE → UN objeto:
   "es_recurrente": true,
   "tipo_recurrencia": "minutal|horario|diario|semanal|mensual|anual",
   "intervalo": N,
-  "tarea": "...",
+  "tarea": "..." (EN INFINITIVO),
   "fecha": "YYYY-MM-DD",
   "hora": "HH:MM:SS",
   "hora_especificada": true|false,
@@ -283,7 +287,7 @@ RECURRENTE → UN objeto:
 MÚLTIPLES → array:
 {{
   "recordatorios": [
-    {{"tarea": "...", "fecha": "YYYY-MM-DD", "hora": "HH:MM:SS", "hora_especificada": true|false, "contexto": "..."}}
+    {{"tarea": "..." (EN INFINITIVO), "fecha": "YYYY-MM-DD", "hora": "HH:MM:SS", "hora_especificada": true|false, "contexto": "..."}}
   ]
 }}
 
@@ -297,11 +301,14 @@ Tipos recurrencia:
 
 Ejemplos:
 "cada 1 minuto desde las 22:19 hasta las 22:21" → {{"es_recurrente":true,"tipo_recurrencia":"minutal","intervalo":1,"tarea":"tomar agua","fecha":"2025-11-05","hora":"22:19:00","hora_especificada":true,"contexto":"recuerdame tomar agua cada 1 minuto desde las 22:19 hasta las 22.21","fecha_fin":"2025-11-05 22:21:00"}}
-"cada 4 horas" → {{"es_recurrente":true,"tipo_recurrencia":"horario","intervalo":4,"tarea":"...","fecha":"2025-11-05","hora":"08:00:00","hora_especificada":false,"contexto":"...","fecha_fin":null}}
-"todos los lunes a las 9" → {{"es_recurrente":true,"tipo_recurrencia":"semanal","intervalo":1,"tarea":"...","fecha":"2025-11-11","hora":"09:00:00","hora_especificada":true,"contexto":"...","dias_semana":[1],"fecha_fin":null}}
+"cada 4 horas" → {{"es_recurrente":true,"tipo_recurrencia":"horario","intervalo":4,"tarea":"revisar el horno","fecha":"2025-11-05","hora":"08:00:00","hora_especificada":false,"contexto":"revisar cada 4 horas","fecha_fin":null}}
+"todos los lunes a las 9" → {{"es_recurrente":true,"tipo_recurrencia":"semanal","intervalo":1,"tarea":"ir al gimnasio","fecha":"2025-11-11","hora":"09:00:00","hora_especificada":true,"contexto":"todos los lunes a las 9","dias_semana":[1],"fecha_fin":null}}
 "recordame cagar a piñas a goku mañana" → {{"recordatorios":[{{"tarea":"cagar a piñas a goku","fecha":"2025-11-06","hora":"09:00:00","hora_especificada":false,"contexto":"recordame cagar a piñas a goku mañana"}}]}}
+"tengo que estudiar mañana" → {{"recordatorios":[{{"tarea":"estudiar","fecha":"2025-11-06","hora":"00:00:00","hora_especificada":false,"contexto":"tengo que estudiar mañana"}}]}}
 
-IMPORTANTE: Acepta CUALQUIER tarea que el usuario quiera recordar, sin importar qué tan extraña suene. Tu trabajo es parsear, NO juzgar.
+IMPORTANTE: 
+- TODAS las tareas deben estar EN INFINITIVO (ej: "debo comprar" → "comprar", "tengo que estudiar" → "estudiar")
+- Acepta CUALQUIER tarea que el usuario quiera recordar, sin importar qué tan extraña suene. Tu trabajo es parsear, NO juzgar.
 
 Si NO tiene fecha/hora clara → {{"error": "no especificaste cuándo"}}
 Respondé SOLO JSON.
@@ -328,8 +335,9 @@ Respondé SOLO JSON.
             if json_data.get('es_recurrente'):
                 recordatorio_recurrente = {
                     'tarea': json_data.get('tarea'),
-                    # Unimos fecha+hora en fecha_hora ISO
-                    'fecha_hora': f"{json_data.get('fecha')} {json_data.get('hora','00:00:00')}",
+                    'fecha': json_data.get('fecha'),
+                    'hora': json_data.get('hora', '00:00:00'),
+                    'hora_especificada': json_data.get('hora_especificada', True),
                     'contexto_original': json_data.get('contexto') or texto_usuario,
                     'es_recurrente': True,
                     'tipo_recurrencia': json_data.get('tipo_recurrencia'),
@@ -348,12 +356,11 @@ Respondé SOLO JSON.
             # SIN límite de cantidad (se eliminó el [:3])
             salida = []
             for r in recordatorios:
-                fecha = r.get('fecha')
-                hora = r.get('hora', '00:00:00')
-                fecha_hora = f"{fecha} {hora}"
                 salida.append({
                     'tarea': r.get('tarea'),
-                    'fecha_hora': fecha_hora,
+                    'fecha': r.get('fecha'),
+                    'hora': r.get('hora', '00:00:00'),
+                    'hora_especificada': r.get('hora_especificada', True),
                     'contexto_original': r.get('contexto') or texto_usuario,
                     'es_recurrente': False,
                     'tipo_recurrencia': None,
@@ -409,7 +416,7 @@ IMPORTANTE:
 
 Extraé la información del recordatorio EDITADO:
 
-1. "tarea": El texto COMPLETO Y ACTUALIZADO del recordatorio con TODOS los cambios aplicados
+1. "tarea": El texto COMPLETO Y ACTUALIZADO del recordatorio EN INFINITIVO con TODOS los cambios aplicados (ej: "comprar", "estudiar", "llamar")
 2. "fecha_hora": La fecha y hora ACTUALIZADAS en formato 'YYYY-MM-DD HH:MM:SS'
 3. "contexto_original": El nuevo texto completo que escribió el usuario (o el contexto actualizado)
 
