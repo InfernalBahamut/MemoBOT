@@ -35,12 +35,50 @@ class TelegramHandlers:
     def _configure_locale(self):
         """Configura el locale para fechas en español."""
         try:
-            locale.setlocale(locale.LC_TIME, 'es_ES.UTF-8')
-        except locale.Error:
-            try:
-                locale.setlocale(locale.LC_TIME, 'Spanish_Spain.1252')
-            except locale.Error:
-                logger.warning("No se pudo setear el locale a Español")
+            # Intentar varios locales españoles
+            for loc in ['es_ES.UTF-8', 'es_AR.UTF-8', 'es_ES', 'Spanish_Spain.1252', 'spanish']:
+                try:
+                    locale.setlocale(locale.LC_TIME, loc)
+                    logger.info(f"Locale configurado: {loc}")
+                    return
+                except locale.Error:
+                    continue
+            
+            # Si ninguno funciona, advertir pero continuar
+            logger.warning("No se pudo configurar locale español, usando traducciones manuales")
+        except Exception as e:
+            logger.error(f"Error configurando locale: {e}")
+    
+    def _formatear_fecha_es(self, dt: datetime, formato: str = "completo") -> str:
+        """
+        Formatea una fecha en español sin depender del locale del sistema.
+        
+        Args:
+            dt: Datetime a formatear
+            formato: "completo" para día completo, "corto" para numérico
+        
+        Returns:
+            str: Fecha formateada en español
+        """
+        # Nombres de días y meses en español
+        dias = ['lunes', 'martes', 'miércoles', 'jueves', 'viernes', 'sábado', 'domingo']
+        meses = ['enero', 'febrero', 'marzo', 'abril', 'mayo', 'junio',
+                 'julio', 'agosto', 'septiembre', 'octubre', 'noviembre', 'diciembre']
+        
+        dia_semana = dias[dt.weekday()]
+        mes = meses[dt.month - 1]
+        
+        if formato == "completo":
+            # Formato: "lunes 11 de noviembre a las 10:00 hs"
+            return f"{dia_semana} {dt.day} de {mes} a las {dt.strftime('%H:%M')} hs"
+        elif formato == "lista":
+            # Formato para listas: "lunes 11 de noviembre - 10:00 hs"
+            return f"{dia_semana} {dt.day} de {mes} - {dt.strftime('%H:%M')} hs"
+        elif formato == "corto":
+            # Formato corto: "11/11/2025 - 10:00 hs"
+            return dt.strftime('%d/%m/%Y - %H:%M hs')
+        else:
+            return f"{dia_semana} {dt.day} de {mes}"
     
     # ==================== COMANDOS PRINCIPALES ====================
     
@@ -457,14 +495,14 @@ Responde SOLO con la hora en formato HH:MM:SS o "ERROR" si no podés entender.
                     f"✅ <b>¡Recordatorio recurrente agendado!</b>\n\n"
                     f"📌 <i>{r['tarea']}</i>\n\n"
                     f"🔄 <b>Se repetirá {tipo_texto}</b>\n"
-                    f"📅 <b>Primera vez:</b> {r['fecha_hora'].strftime('%A %d de %B a las %H:%M hs')}\n\n"
+                    f"📅 <b>Primera vez:</b> {self._formatear_fecha_es(r['fecha_hora'], 'completo')}\n\n"
                     f"💡 Usá /listar para ver todos tus recordatorios"
                 )
             else:
                 mensaje = (
                     f"✅ <b>¡Recordatorio agendado!</b>\n\n"
                     f"📌 <i>{r['tarea']}</i>\n\n"
-                    f"📅 {r['fecha_hora'].strftime('%A %d de %B a las %H:%M hs')}\n\n"
+                    f"📅 {self._formatear_fecha_es(r['fecha_hora'], 'completo')}\n\n"
                     f"💡 Usá /listar para ver todos tus recordatorios"
                 )
         
@@ -474,7 +512,7 @@ Responde SOLO con la hora en formato HH:MM:SS o "ERROR" si no podés entender.
             
             for r in creados:
                 mensaje += f"📌 <i>{r['tarea']}</i>\n"
-                mensaje += f"📅 {r['fecha_hora'].strftime('%A %d de %B - %H:%M hs')}\n"
+                mensaje += f"📅 {self._formatear_fecha_es(r['fecha_hora'], 'lista')}\n"
                 mensaje += "─────────────────────\n"
             
             mensaje += "\n💡 Usá /listar para ver todos tus recordatorios"
@@ -544,7 +582,7 @@ Responde SOLO con la hora en formato HH:MM:SS o "ERROR" si no podés entender.
                 # Truncar tarea para mostrar en botón
                 tarea_corta = (tarea[:30] + '...') if len(tarea) > 30 else tarea
                 message_text += f"📌 <b>{tarea}</b>\n"
-                message_text += f"📅 {fecha_hora_arg.strftime('%A %d de %B - %H:%M hs')}\n"
+                message_text += f"📅 {self._formatear_fecha_es(fecha_hora_arg, 'lista')}\n"
                 
                 keyboard.append([
                     InlineKeyboardButton(f"✏️ {tarea_corta}", callback_data=f"edit:{job_id}"),
@@ -738,7 +776,7 @@ Responde SOLO con la hora en formato HH:MM:SS o "ERROR" si no podés entender.
             mensaje = (
                 f"✏️ <b>Editando recordatorio:</b>\n"
                 f"<i>'{tarea}'</i>\n"
-                f"📅 {fecha_hora_arg.strftime('%A %d de %B a las %H:%M hs')}\n\n"
+                f"📅 {self._formatear_fecha_es(fecha_hora_arg, 'completo')}\n\n"
                 f"💬 <b>Escribí qué querés cambiar</b>\n\n"
                 f"Podés hacer cambios incrementales:\n"
                 f"• <i>El examen era el martes no el lunes</i>\n"
@@ -837,7 +875,7 @@ Responde SOLO con la hora en formato HH:MM:SS o "ERROR" si no podés entender.
                 f"✅ <b>Recordatorio actualizado!</b>\n\n"
                 f"📌 <b>Nuevo recordatorio:</b>\n"
                 f"<i>'{tarea}'</i>\n\n"
-                f"📅 <b>Nueva fecha:</b>\n{fecha_hora_obj.strftime('%A %d de %B a las %H:%M hs')}"
+                f"📅 <b>Nueva fecha:</b>\n{self._formatear_fecha_es(fecha_hora_obj, 'completo')}"
             )
             await context.bot.edit_message_text(
                 chat_id=chat_id, 
