@@ -251,6 +251,82 @@ Responde SOLO con el mensaje, sin formato extra ni explicaciones.
             # Fallback a mensaje genérico
             return "⏰ ¡Es hora! Dale que vos podés 💪"
     
+    async def extract_smart_context(self, contexto_original: str, tarea: str) -> str:
+        """
+        Extrae el contexto relevante de forma inteligente usando Gemini.
+        Evita copiar literalmente, reformatea de forma natural.
+        
+        Args:
+            contexto_original: Texto completo del usuario
+            tarea: Tarea extraída (en infinitivo)
+        
+        Returns:
+            str: Contexto relevante formateado naturalmente
+        """
+        prompt = f"""
+Sos un asistente que extrae información contextual relevante.
+
+Texto original del usuario: "{contexto_original}"
+Tarea principal extraída: "{tarea}"
+
+Tu trabajo es extraer SOLO la información contextual adicional que NO esté ya en la tarea, y formatearla de forma natural y concisa.
+
+REGLAS ESTRICTAS:
+1. NO repitas la tarea
+2. NO incluyas referencias temporales genéricas (mañana, hoy, a las X) - eso ya está en el recordatorio
+3. NO incluyas palabras de relleno como "hola", "recordame", "que", etc.
+4. Extrae SOLO información útil como: lugares, personas, eventos, motivos, especificaciones
+5. Formatea de forma natural con capitalización correcta
+6. Máximo 60 caracteres
+7. Si no hay contexto útil adicional, responde solo: NINGUNO
+
+EJEMPLOS:
+
+Usuario: "el lunes quiero ir a comprar un auto temprano en el concesionario de mi tio"
+Tarea: "comprar un auto"
+Respuesta correcta: "En el concesionario del tío"
+Respuesta INCORRECTA: "el lunes quiero ir temprano" (repite tarea y tiempo)
+
+Usuario: "recordame estudiar para el examen de química mañana a las 18"
+Tarea: "estudiar"
+Respuesta correcta: "Para el examen de química"
+Respuesta INCORRECTA: "mañana a las 18" (solo tiempo)
+
+Usuario: "comprar pan"
+Tarea: "comprar pan"
+Respuesta correcta: NINGUNO
+Respuesta INCORRECTA: "comprar pan" (repite tarea)
+
+Usuario: "llamar a juan sobre el proyecto del trabajo a las 15"
+Tarea: "llamar"
+Respuesta correcta: "A Juan sobre el proyecto del trabajo"
+Respuesta INCORRECTA: "a las 15" (solo tiempo)
+
+Usuario: "hola, recordame comer un telefono a las 19.35"
+Tarea: "comer un telefono"
+Respuesta correcta: NINGUNO
+Respuesta INCORRECTA: "hola recordame" (relleno)
+
+Responde SOLO con el contexto extraído o NINGUNO. Sin explicaciones ni formato extra.
+"""
+        
+        try:
+            response = await self.model.generate_content_async(prompt)
+            contexto = response.text.strip()
+            # Limpiar comillas y espacios
+            contexto = contexto.strip('"').strip("'").strip()
+            
+            # Si dice NINGUNO o está vacío, retornar cadena vacía
+            if contexto.upper() == "NINGUNO" or not contexto or len(contexto) < 3:
+                return ""
+            
+            logger.info(f"Contexto inteligente extraído: '{contexto}' desde '{contexto_original}'")
+            return contexto
+        except Exception as e:
+            logger.error(f"Error extrayendo contexto inteligente: {e}")
+            # Fallback: no mostrar contexto si falla
+            return ""
+    
     async def parse_multiple_reminders(self, texto_usuario: str) -> Tuple[Optional[list], Optional[str]]:
         """
         Parsea el texto del usuario para detectar múltiples recordatorios o recurrencia.
