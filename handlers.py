@@ -819,17 +819,23 @@ Responde SOLO con la hora en formato HH:MM:SS o "ERROR" si no podés entender.
         chat_id = update.message.chat_id
         texto_usuario = update.message.text
         
-        # Recuperar datos originales
-        old_job_id = context.user_data.pop('job_to_edit', None)
-        tarea_original = context.user_data.pop('job_original_tarea', None)
-        fecha_original = context.user_data.pop('job_original_fecha', None)
-        contexto_original = context.user_data.pop('job_original_contexto', None)
+        # Recuperar datos originales SIN hacer pop (mantenerlos para reintentos)
+        old_job_id = context.user_data.get('job_to_edit')
+        tarea_original = context.user_data.get('job_original_tarea')
+        fecha_original = context.user_data.get('job_original_fecha')
+        contexto_original = context.user_data.get('job_original_contexto')
         
         if not old_job_id or not tarea_original or not fecha_original:
-            await update.message.reply_text("Ocurrió un error. Usá /listar y presioná el botón ✏️")
+            # Limpiar datos si faltan
+            context.user_data.pop('job_to_edit', None)
+            context.user_data.pop('job_original_tarea', None)
+            context.user_data.pop('job_original_fecha', None)
+            context.user_data.pop('job_original_contexto', None)
+            
+            await update.message.reply_text("⚠️ Ocurrió un error. Usá /listar y presioná el botón ✏️")
             return ConversationHandler.END
         
-        msg_temporal = await update.message.reply_text("Procesando tu edición...")
+        msg_temporal = await update.message.reply_text("⏳ Procesando tu edición...")
         
         # Parsear usando el nuevo método con contexto
         tarea, fecha_hora_obj, error_msg, recurrence_data = await self.gemini.parse_reminder_edit(
@@ -840,21 +846,32 @@ Responde SOLO con la hora en formato HH:MM:SS o "ERROR" si no podés entender.
         )
         
         if error_msg:
+            # Crear botón de cancelar
+            keyboard = [[InlineKeyboardButton("❌ Cancelar edición", callback_data="cancel_edit")]]
+            reply_markup = InlineKeyboardMarkup(keyboard)
+            
             await context.bot.edit_message_text(
                 chat_id=chat_id, 
                 message_id=msg_temporal.message_id, 
-                text=error_msg
+                text=f"{error_msg}\n\n💬 <b>Intentá de nuevo o cancelá:</b>",
+                parse_mode="HTML",
+                reply_markup=reply_markup
             )
             return EDITANDO_RECORDATORIO
         
         # Validar que la nueva fecha sea futura (solo si no es recurrente)
         es_recurrente = recurrence_data and recurrence_data.get('tipo')
         if not es_recurrente and fecha_hora_obj <= now_for_user():
+            # Crear botón de cancelar
+            keyboard = [[InlineKeyboardButton("❌ Cancelar edición", callback_data="cancel_edit")]]
+            reply_markup = InlineKeyboardMarkup(keyboard)
+            
             await context.bot.edit_message_text(
                 chat_id=chat_id, 
                 message_id=msg_temporal.message_id,
-                text="⚠️ La nueva fecha debe ser en el futuro. Intentá de nuevo con una fecha futura.",
-                parse_mode="HTML"
+                text="⚠️ <b>La fecha debe ser en el futuro.</b>\n\n💬 Intentá con una fecha posterior o cancelá:",
+                parse_mode="HTML",
+                reply_markup=reply_markup
             )
             return EDITANDO_RECORDATORIO
         
@@ -874,6 +891,12 @@ Responde SOLO con la hora en formato HH:MM:SS o "ERROR" si no podés entender.
             
             # Actualizar con el nuevo contexto
             self.db.update_reminder(old_job_id, chat_id, tarea, fecha_hora_utc, nuevo_contexto)
+            
+            # Limpiar datos de edición (solo cuando es exitoso)
+            context.user_data.pop('job_to_edit', None)
+            context.user_data.pop('job_original_tarea', None)
+            context.user_data.pop('job_original_fecha', None)
+            context.user_data.pop('job_original_contexto', None)
             
             keyboard = [[InlineKeyboardButton("« Volver al Menú", callback_data="menu_principal")]]
             reply_markup = InlineKeyboardMarkup(keyboard)
@@ -907,8 +930,11 @@ Responde SOLO con la hora en formato HH:MM:SS o "ERROR" si no podés entender.
     
     async def cancel_edit(self, update: Update, context: ContextTypes.DEFAULT_TYPE) -> int:
         """Comando /cancelar o botón de 'Cancelar'."""
-        if 'job_to_edit' in context.user_data:
-            context.user_data.pop('job_to_edit')
+        # Limpiar todos los datos de edición
+        context.user_data.pop('job_to_edit', None)
+        context.user_data.pop('job_original_tarea', None)
+        context.user_data.pop('job_original_fecha', None)
+        context.user_data.pop('job_original_contexto', None)
         
         logger.info(f"Usuario {update.effective_chat.id} canceló la edición")
         
@@ -917,13 +943,15 @@ Responde SOLO con la hora en formato HH:MM:SS o "ERROR" si no podés entender.
         
         if update.callback_query:
             await update.callback_query.edit_message_text(
-                "Edición cancelada. No se hicieron cambios.",
-                reply_markup=reply_markup
+                "❌ <b>Edición cancelada.</b>\n\nNo se hicieron cambios al recordatorio.",
+                reply_markup=reply_markup,
+                parse_mode="HTML"
             )
         else:
             await update.message.reply_text(
-                "Edición cancelada. No se hicieron cambios.",
-                reply_markup=reply_markup
+                "❌ <b>Edición cancelada.</b>\n\nNo se hicieron cambios al recordatorio.",
+                reply_markup=reply_markup,
+                parse_mode="HTML"
             )
         
         return ConversationHandler.END

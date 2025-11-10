@@ -80,7 +80,8 @@ def main() -> None:
             CommandHandler("cancelar", handlers.cancel_edit),
             CallbackQueryHandler(handlers.cancel_edit, pattern='^cancel_edit$')
         ],
-        per_message=False
+        per_message=False,
+        conversation_timeout=60  # Timeout de 60 segundos (1 minuto)
     )
     
     # Flujo de conversación de CREACIÓN (para pedir hora si falta)
