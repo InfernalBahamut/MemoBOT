@@ -327,6 +327,133 @@ Responde SOLO con el contexto extraído o NINGUNO. Sin explicaciones ni formato 
             # Fallback: no mostrar contexto si falla
             return ""
     
+    def extract_smart_context_sync(self, contexto_original: str, tarea: str) -> str:
+        """
+        Versión SÍNCRONA de extract_smart_context para usar desde threads.
+        Extrae el contexto relevante de forma inteligente usando Gemini.
+        
+        Args:
+            contexto_original: Texto completo del usuario
+            tarea: Tarea extraída (en infinitivo)
+        
+        Returns:
+            str: Contexto relevante formateado naturalmente
+        """
+        prompt = f"""
+Sos un asistente que extrae información contextual relevante.
+
+Texto original del usuario: "{contexto_original}"
+Tarea principal extraída: "{tarea}"
+
+Tu trabajo es extraer SOLO la información contextual adicional que NO esté ya en la tarea, y formatearla de forma natural y concisa.
+
+REGLAS ESTRICTAS:
+1. NO repitas la tarea
+2. NO incluyas referencias temporales genéricas (mañana, hoy, a las X) - eso ya está en el recordatorio
+3. NO incluyas palabras de relleno como "hola", "recordame", "que", etc.
+4. Extrae SOLO información útil como: lugares, personas, eventos, motivos, especificaciones
+5. Formatea de forma natural con capitalización correcta
+6. Máximo 60 caracteres
+7. Si no hay contexto útil adicional, responde solo: NINGUNO
+
+EJEMPLOS:
+
+Usuario: "el lunes quiero ir a comprar un auto temprano en el concesionario de mi tio"
+Tarea: "comprar un auto"
+Respuesta correcta: "En el concesionario del tío"
+Respuesta INCORRECTA: "el lunes quiero ir temprano" (repite tarea y tiempo)
+
+Usuario: "recordame estudiar para el examen de química mañana a las 18"
+Tarea: "estudiar"
+Respuesta correcta: "Para el examen de química"
+Respuesta INCORRECTA: "mañana a las 18" (solo tiempo)
+
+Usuario: "comprar pan"
+Tarea: "comprar pan"
+Respuesta correcta: NINGUNO
+Respuesta INCORRECTA: "comprar pan" (repite tarea)
+
+Usuario: "llamar a juan sobre el proyecto del trabajo a las 15"
+Tarea: "llamar"
+Respuesta correcta: "A Juan sobre el proyecto del trabajo"
+Respuesta INCORRECTA: "a las 15" (solo tiempo)
+
+Usuario: "hola, recordame comer un telefono a las 19.35"
+Tarea: "comer un telefono"
+Respuesta correcta: NINGUNO
+Respuesta INCORRECTA: "hola recordame" (relleno)
+
+Responde SOLO con el contexto extraído o NINGUNO. Sin explicaciones ni formato extra.
+"""
+        
+        try:
+            response = self.model.generate_content(prompt)
+            contexto = response.text.strip()
+            # Limpiar comillas y espacios
+            contexto = contexto.strip('"').strip("'").strip()
+            
+            # Si dice NINGUNO o está vacío, retornar cadena vacía
+            if contexto.upper() == "NINGUNO" or not contexto or len(contexto) < 3:
+                return ""
+            
+            logger.info(f"Contexto inteligente extraído (sync): '{contexto}' desde '{contexto_original}'")
+            return contexto
+        except Exception as e:
+            logger.error(f"Error extrayendo contexto inteligente (sync): {e}")
+            # Fallback: no mostrar contexto si falla
+            return ""
+    
+    def generate_funny_reminder_message_sync(self, tarea: str, contexto_original: str = None) -> str:
+        """
+        Versión SÍNCRONA de generate_funny_reminder_message para usar desde threads.
+        Genera un mensaje simpático y picarón para un recordatorio usando Gemini.
+        
+        Args:
+            tarea: La tarea del recordatorio
+            contexto_original: El texto original del usuario (para mejor contexto)
+        
+        Returns:
+            str: Mensaje con humor generado por Gemini
+        """
+        prompt = f"""
+Sos un asistente virtual simpático y picarón. Tu trabajo es generar un mensaje MUY BREVE (máximo 20 palabras) 
+con humor para acompañar un recordatorio.
+
+Recordatorio: "{tarea}"
+{f'Contexto original del usuario: "{contexto_original}"' if contexto_original else ''}
+
+IMPORTANTE:
+- El mensaje DEBE estar ESTRICTAMENTE relacionado con el contenido del recordatorio Y su contexto
+- Si hay contexto adicional (ej: "para el examen de química"), úsalo para hacer el mensaje más específico
+- Debe ser simpático, divertido, y un poco picarón (pero sin pasarse)
+- Debe motivar, hacer reír o reflexionar
+- Usa emojis relacionados al tema
+- Máximo 20 palabras
+- NO uses comillas en la respuesta
+- NO repitas información que ya está en el recordatorio principal
+
+Ejemplos de buen estilo:
+- Para "pagar la luz": "💸 Tu billetera llora, pero tus electrodomésticos te lo van a agradecer 😅"
+- Para "ir al gym": "💪 Hoy no hay excusas! El sofá puede esperar (aunque te llame) 🛋️"
+- Para "estudiar" con contexto "para el examen de química": "📚 Los átomos no se van a memorizar solos! Dale campeón 🧪"
+- Para "comprar regalo" con contexto "cumpleaños de mamá": "🎁 Nada de última hora, que mamá se merece lo mejor! 💝"
+- Para "llamar al dentista": "🦷 Tu sonrisa te va a agradecer. No lo sigas postergando! 😁"
+
+Responde SOLO con el mensaje, sin formato extra ni explicaciones.
+"""
+        
+        try:
+            response = self.model.generate_content(prompt)
+            mensaje = response.text.strip()
+            # Limpiar comillas si las tiene
+            mensaje = mensaje.strip('"').strip("'")
+            logger.info(f"Mensaje con humor generado (sync): {mensaje}")
+            return mensaje
+        except Exception as e:
+            logger.error(f"Error generando mensaje con humor (sync): {e}")
+            # Fallback a mensaje genérico
+            return "⏰ ¡Es hora! Dale que vos podés 💪"
+    
     async def parse_multiple_reminders(self, texto_usuario: str) -> Tuple[Optional[list], Optional[str]]:
         """
         Parsea el texto del usuario para detectar múltiples recordatorios o recurrencia.

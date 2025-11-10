@@ -121,54 +121,48 @@ class ReminderScheduler:
             contexto_original: Texto original del usuario (opcional)
         """
         try:
-            # Función asíncrona para generar todo el contenido
-            async def generar_y_enviar():
-                """Genera contexto, mensaje gracioso y envía todo."""
-                contexto_limpio = ""
-                funny_msg = "⏰ ¡Es hora! Dale que vos podés 💪"
-                
-                # Extraer contexto inteligente usando Gemini (si existe contexto original)
-                if contexto_original and contexto_original.strip().lower() != tarea.strip().lower():
-                    try:
-                        contexto_limpio = await self.gemini.extract_smart_context(contexto_original, tarea)
-                    except Exception as e:
-                        logger.warning(f"Error extrayendo contexto: {e}")
-                
-                # Generar mensaje con humor usando Gemini
+            # Extraer contexto inteligente usando Gemini (versión síncrona para threads)
+            contexto_limpio = ""
+            if contexto_original and contexto_original.strip().lower() != tarea.strip().lower():
                 try:
-                    funny_msg = await self.gemini.generate_funny_reminder_message(tarea, contexto_original)
+                    contexto_limpio = self.gemini.extract_smart_context_sync(contexto_original, tarea)
                 except Exception as e:
-                    logger.warning(f"Error generando mensaje gracioso: {e}")
-                
-                # Construir mensaje
-                mensaje = f"🔔 ¡RECORDATORIO! 🔔\n\n"
-                mensaje += f"📌 <b>{tarea.capitalize()}</b>\n"
-                
-                # Agregar contexto inteligente si existe
-                if contexto_limpio:
-                    mensaje += f"💬 <i>{contexto_limpio}</i>\n"
-                
-                mensaje += f"\n{funny_msg}"
-                
-                # Crear botón para volver al menú
-                keyboard = [[InlineKeyboardButton("« Volver al Menú", callback_data="menu_principal")]]
-                reply_markup = InlineKeyboardMarkup(keyboard)
-                
-                # Enviar el mensaje
+                    logger.warning(f"Error extrayendo contexto: {e}")
+            
+            # Generar mensaje con humor usando Gemini (versión síncrona para threads)
+            try:
+                funny_msg = self.gemini.generate_funny_reminder_message_sync(tarea, contexto_original)
+            except Exception as e:
+                logger.warning(f"Error generando mensaje gracioso: {e}")
+                funny_msg = "⏰ ¡Es hora! Dale que vos podés 💪"
+            
+            # Construir mensaje
+            mensaje = f"🔔 ¡RECORDATORIO! 🔔\n\n"
+            mensaje += f"📌 <b>{tarea.capitalize()}</b>\n"
+            
+            # Agregar contexto inteligente si existe
+            if contexto_limpio:
+                mensaje += f"💬 <i>{contexto_limpio}</i>\n"
+            
+            mensaje += f"\n{funny_msg}"
+            
+            # Crear botón para volver al menú
+            keyboard = [[InlineKeyboardButton("« Volver al Menú", callback_data="menu_principal")]]
+            reply_markup = InlineKeyboardMarkup(keyboard)
+            
+            # Enviar el mensaje (de forma síncrona en este thread)
+            async def enviar():
                 await self.bot.send_message(
                     chat_id=chat_id, 
                     text=mensaje, 
                     parse_mode="HTML",
                     reply_markup=reply_markup
                 )
-                
-                return True
             
-            # Crear un nuevo event loop para este thread
             loop = asyncio.new_event_loop()
             asyncio.set_event_loop(loop)
             try:
-                loop.run_until_complete(generar_y_enviar())
+                loop.run_until_complete(enviar())
                 logger.info(f"Recordatorio {reminder_id} enviado a {chat_id}")
             finally:
                 loop.close()
@@ -183,25 +177,29 @@ class ReminderScheduler:
                 keyboard = [[InlineKeyboardButton("« Volver al Menú", callback_data="menu_principal")]]
                 reply_markup = InlineKeyboardMarkup(keyboard)
                 
+                async def enviar_fallback():
+                    await self.bot.send_message(
+                        chat_id=chat_id, 
+                        text=mensaje,
+                        reply_markup=reply_markup
+                    )
+                
                 loop = asyncio.new_event_loop()
                 asyncio.set_event_loop(loop)
                 try:
-                    loop.run_until_complete(
-                        self.bot.send_message(
-                            chat_id=chat_id, 
-                            text=mensaje,
-                            reply_markup=reply_markup
-                        )
-                    )
+                    loop.run_until_complete(enviar_fallback())
                 finally:
                     loop.close()
             except:
                 # Si todo falla, enviar solo texto
                 try:
+                    async def enviar_simple():
+                        await self.bot.send_message(chat_id=chat_id, text=mensaje)
+                    
                     loop = asyncio.new_event_loop()
                     asyncio.set_event_loop(loop)
                     try:
-                        loop.run_until_complete(self.bot.send_message(chat_id=chat_id, text=mensaje))
+                        loop.run_until_complete(enviar_simple())
                     finally:
                         loop.close()
                 except:
