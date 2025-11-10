@@ -121,10 +121,11 @@ class ReminderScheduler:
             contexto_original: Texto original del usuario (opcional)
         """
         try:
-            # Crear un único loop para todas las operaciones asíncronas
-            async def generar_contenido():
-                """Genera contexto y mensaje gracioso en paralelo."""
+            # Función asíncrona para generar todo el contenido
+            async def generar_y_enviar():
+                """Genera contexto, mensaje gracioso y envía todo."""
                 contexto_limpio = ""
+                funny_msg = "⏰ ¡Es hora! Dale que vos podés 💪"
                 
                 # Extraer contexto inteligente usando Gemini (si existe contexto original)
                 if contexto_original and contexto_original.strip().lower() != tarea.strip().lower():
@@ -138,35 +139,39 @@ class ReminderScheduler:
                     funny_msg = await self.gemini.generate_funny_reminder_message(tarea, contexto_original)
                 except Exception as e:
                     logger.warning(f"Error generando mensaje gracioso: {e}")
-                    funny_msg = "⏰ ¡Es hora! Dale que vos podés 💪"
                 
-                return contexto_limpio, funny_msg
+                # Construir mensaje
+                mensaje = f"🔔 ¡RECORDATORIO! 🔔\n\n"
+                mensaje += f"📌 <b>{tarea.capitalize()}</b>\n"
+                
+                # Agregar contexto inteligente si existe
+                if contexto_limpio:
+                    mensaje += f"💬 <i>{contexto_limpio}</i>\n"
+                
+                mensaje += f"\n{funny_msg}"
+                
+                # Crear botón para volver al menú
+                keyboard = [[InlineKeyboardButton("« Volver al Menú", callback_data="menu_principal")]]
+                reply_markup = InlineKeyboardMarkup(keyboard)
+                
+                # Enviar el mensaje
+                await self.bot.send_message(
+                    chat_id=chat_id, 
+                    text=mensaje, 
+                    parse_mode="HTML",
+                    reply_markup=reply_markup
+                )
+                
+                return True
             
-            # Ejecutar la generación de contenido
-            contexto_limpio, funny_msg = asyncio.run(generar_contenido())
-            
-            # Construir mensaje
-            mensaje = f"🔔 ¡RECORDATORIO! 🔔\n\n"
-            mensaje += f"📌 <b>{tarea.capitalize()}</b>\n"
-            
-            # Agregar contexto inteligente si existe
-            if contexto_limpio:
-                mensaje += f"💬 <i>{contexto_limpio}</i>\n"
-            
-            mensaje += f"\n{funny_msg}"
-            
-            # Crear botón para volver al menú
-            keyboard = [[InlineKeyboardButton("« Volver al Menú", callback_data="menu_principal")]]
-            reply_markup = InlineKeyboardMarkup(keyboard)
-            
-            # Enviar el mensaje
-            asyncio.run(self.bot.send_message(
-                chat_id=chat_id, 
-                text=mensaje, 
-                parse_mode="HTML",
-                reply_markup=reply_markup
-            ))
-            logger.info(f"Recordatorio {reminder_id} enviado a {chat_id}")
+            # Crear un nuevo event loop para este thread
+            loop = asyncio.new_event_loop()
+            asyncio.set_event_loop(loop)
+            try:
+                loop.run_until_complete(generar_y_enviar())
+                logger.info(f"Recordatorio {reminder_id} enviado a {chat_id}")
+            finally:
+                loop.close()
             
         except Exception as e:
             logger.error(f"Error enviando recordatorio {reminder_id}: {e}", exc_info=True)
@@ -177,12 +182,28 @@ class ReminderScheduler:
             try:
                 keyboard = [[InlineKeyboardButton("« Volver al Menú", callback_data="menu_principal")]]
                 reply_markup = InlineKeyboardMarkup(keyboard)
-                asyncio.run(self.bot.send_message(
-                    chat_id=chat_id, 
-                    text=mensaje,
-                    reply_markup=reply_markup
-                ))
+                
+                loop = asyncio.new_event_loop()
+                asyncio.set_event_loop(loop)
+                try:
+                    loop.run_until_complete(
+                        self.bot.send_message(
+                            chat_id=chat_id, 
+                            text=mensaje,
+                            reply_markup=reply_markup
+                        )
+                    )
+                finally:
+                    loop.close()
             except:
                 # Si todo falla, enviar solo texto
-                asyncio.run(self.bot.send_message(chat_id=chat_id, text=mensaje))
+                try:
+                    loop = asyncio.new_event_loop()
+                    asyncio.set_event_loop(loop)
+                    try:
+                        loop.run_until_complete(self.bot.send_message(chat_id=chat_id, text=mensaje))
+                    finally:
+                        loop.close()
+                except:
+                    logger.error(f"No se pudo enviar recordatorio {reminder_id} ni siquiera en fallback")
 
