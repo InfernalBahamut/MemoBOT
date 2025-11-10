@@ -863,7 +863,14 @@ Responde SOLO con la hora en formato HH:MM:SS o "ERROR" si no podés entender.
             fecha_hora_utc = to_utc(fecha_hora_obj)
             
             # Extraer nuevo contexto
-            nuevo_contexto = recurrence_data.get('contexto_original') if recurrence_data else None
+            # Si es recurrente y viene contexto en recurrence_data, usarlo
+            # Si no, usar texto_usuario como nuevo contexto (la solicitud completa de edición)
+            if recurrence_data and recurrence_data.get('contexto_original'):
+                nuevo_contexto = recurrence_data.get('contexto_original')
+            else:
+                # Usar el texto del usuario como contexto (ej: "mejor hoy a las 20.00")
+                # Esto permite que Gemini extraiga info útil al momento de notificar
+                nuevo_contexto = texto_usuario
             
             # Actualizar con el nuevo contexto
             self.db.update_reminder(old_job_id, chat_id, tarea, fecha_hora_utc, nuevo_contexto)

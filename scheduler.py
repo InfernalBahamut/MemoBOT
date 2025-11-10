@@ -120,6 +120,7 @@ class ReminderScheduler:
             reminder_id: ID del recordatorio
             contexto_original: Texto original del usuario (opcional)
         """
+        loop = None
         try:
             # Extraer contexto inteligente usando Gemini (versión síncrona para threads)
             contexto_limpio = ""
@@ -159,13 +160,11 @@ class ReminderScheduler:
                     reply_markup=reply_markup
                 )
             
+            # Crear y ejecutar en un nuevo event loop
             loop = asyncio.new_event_loop()
             asyncio.set_event_loop(loop)
-            try:
-                loop.run_until_complete(enviar())
-                logger.info(f"Recordatorio {reminder_id} enviado a {chat_id}")
-            finally:
-                loop.close()
+            loop.run_until_complete(enviar())
+            logger.info(f"Recordatorio {reminder_id} enviado a {chat_id}")
             
         except Exception as e:
             logger.error(f"Error enviando recordatorio {reminder_id}: {e}", exc_info=True)
@@ -184,24 +183,25 @@ class ReminderScheduler:
                         reply_markup=reply_markup
                     )
                 
-                loop = asyncio.new_event_loop()
-                asyncio.set_event_loop(loop)
-                try:
-                    loop.run_until_complete(enviar_fallback())
-                finally:
-                    loop.close()
-            except:
+                if loop is None:
+                    loop = asyncio.new_event_loop()
+                    asyncio.set_event_loop(loop)
+                loop.run_until_complete(enviar_fallback())
+            except Exception as e2:
+                logger.error(f"Error en fallback: {e2}")
                 # Si todo falla, enviar solo texto
                 try:
                     async def enviar_simple():
                         await self.bot.send_message(chat_id=chat_id, text=mensaje)
                     
-                    loop = asyncio.new_event_loop()
-                    asyncio.set_event_loop(loop)
-                    try:
-                        loop.run_until_complete(enviar_simple())
-                    finally:
-                        loop.close()
-                except:
-                    logger.error(f"No se pudo enviar recordatorio {reminder_id} ni siquiera en fallback")
+                    if loop is None:
+                        loop = asyncio.new_event_loop()
+                        asyncio.set_event_loop(loop)
+                    loop.run_until_complete(enviar_simple())
+                except Exception as e3:
+                    logger.error(f"No se pudo enviar recordatorio {reminder_id} ni siquiera en fallback: {e3}")
+        finally:
+            # Cerrar el loop solo si existe y no está cerrado
+            if loop is not None and not loop.is_closed():
+                loop.close()
 
