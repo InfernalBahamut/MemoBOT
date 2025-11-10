@@ -299,8 +299,11 @@ Ejemplos:
 "cada 1 minuto desde las 22:19 hasta las 22:21" → {{"es_recurrente":true,"tipo_recurrencia":"minutal","intervalo":1,"tarea":"tomar agua","fecha":"2025-11-05","hora":"22:19:00","hora_especificada":true,"contexto":"recuerdame tomar agua cada 1 minuto desde las 22:19 hasta las 22.21","fecha_fin":"2025-11-05 22:21:00"}}
 "cada 4 horas" → {{"es_recurrente":true,"tipo_recurrencia":"horario","intervalo":4,"tarea":"...","fecha":"2025-11-05","hora":"08:00:00","hora_especificada":false,"contexto":"...","fecha_fin":null}}
 "todos los lunes a las 9" → {{"es_recurrente":true,"tipo_recurrencia":"semanal","intervalo":1,"tarea":"...","fecha":"2025-11-11","hora":"09:00:00","hora_especificada":true,"contexto":"...","dias_semana":[1],"fecha_fin":null}}
+"recordame cagar a piñas a goku mañana" → {{"recordatorios":[{{"tarea":"cagar a piñas a goku","fecha":"2025-11-06","hora":"09:00:00","hora_especificada":false,"contexto":"recordame cagar a piñas a goku mañana"}}]}}
 
-Si no entendés → {{"error": "no entendí"}}
+IMPORTANTE: Acepta CUALQUIER tarea que el usuario quiera recordar, sin importar qué tan extraña suene. Tu trabajo es parsear, NO juzgar.
+
+Si NO tiene fecha/hora clara → {{"error": "no especificaste cuándo"}}
 Respondé SOLO JSON.
 """
         
@@ -313,10 +316,13 @@ Respondé SOLO JSON.
             json_data = self._extract_json(respuesta_gemini_str)
             
             if not json_data:
-                return None, "No se pudo parsear la respuesta de la IA."
+                return None, "🤔 No pude entender tu solicitud. ¿Podrías decirme qué querés recordar y cuándo?"
             
             if "error" in json_data:
-                return None, f"No pude entender tu solicitud. {json_data['error']}"
+                error_msg = json_data.get('error', '')
+                if 'cuándo' in error_msg or 'fecha' in error_msg:
+                    return None, "📅 Entiendo qué querés recordar, pero ¿cuándo querés que te lo recuerde? (ejemplo: mañana, el lunes, en 2 horas)"
+                return None, "🤔 No pude entender tu solicitud. ¿Podrías reformular qué querés que te recuerde y cuándo?"
             
             # Si Gemini indica un recordatorio recurrente, normalizamos los nombres
             if json_data.get('es_recurrente'):
@@ -504,20 +510,23 @@ Si no podés entender, respondé: {{"error": "no entendí la modificación, pod�
                 - es_recordatorio: True si es intención de crear recordatorio, False si es fuera de tema
         """
         prompt = f"""
-Sos un bot de recordatorios amigable. Tu ÚNICO propósito es ayudar a crear, editar y gestionar recordatorios.
+Sos un bot de recordatorios amigable y con sentido del humor. Tu ÚNICO propósito es ayudar a crear, editar y gestionar recordatorios.
 
 Texto del usuario: "{texto_usuario}"
 
 Clasificá este mensaje en una de estas categorías:
 
-1. RECORDATORIO: El usuario quiere crear, modificar o consultar un recordatorio
+1. RECORDATORIO: El usuario quiere crear, modificar o consultar un recordatorio (incluso si suena extraño o gracioso)
    Ejemplos: "recuerdame comprar pan", "tengo que estudiar mañana", "agenda reunión el lunes", "recordatorio para las 3pm"
+   También incluye: "recordame cagar a piñas a goku", "avisame cuando sea hora de ser batman", "recuerdame dominar el mundo"
 
 2. SALUDO/CORTESIA: Saludo, despedida o cortesía relacionada con recordatorios
-   Ejemplos: "hola", "gracias", "chau", "buenas", "cómo estás"
+   Ejemplos: "hola", "gracias", "chau", "buenas", "cómo estás", "qué tal"
 
-3. FUERA_DE_TEMA: Pregunta o solicitud NO relacionada con recordatorios
+3. FUERA_DE_TEMA: Pregunta o solicitud NO relacionada con recordatorios (cosas que NO son tareas para recordar)
    Ejemplos: "cuánto es 2+2", "dame una receta", "contame un chiste", "qué hora es", "cómo está el clima"
+
+IMPORTANTE: Si el usuario dice "recuerdame X" o "recordatorio de X", SIEMPRE es RECORDATORIO, sin importar qué sea X.
 
 Responde SOLO con un JSON:
 {{
@@ -526,8 +535,8 @@ Responde SOLO con un JSON:
 }}
 
 Si es RECORDATORIO, deja "respuesta" vacío ("").
-Si es SALUDO, responde de forma amigable pero breve y recordá tu propósito.
-Si es FUERA_DE_TEMA, responde cortésmente que solo podés ayudar con recordatorios.
+Si es SALUDO, responde de forma amigable pero breve, mencionando que estás listo para ayudar con recordatorios.
+Si es FUERA_DE_TEMA, responde con humor que solo podés ayudar con recordatorios, y sugerí crear uno.
 
 Responde SOLO el JSON, sin texto adicional.
 """
