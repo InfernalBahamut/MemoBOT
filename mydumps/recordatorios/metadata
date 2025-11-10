@@ -1,7 +1,0 @@
-Started dump at: 2025-11-05 22:32:15
-SHOW MASTER STATUS:
-	Log: binlog.000024
-	Pos: 73895
-	GTID:
-
-Finished dump at: 2025-11-05 22:32:15

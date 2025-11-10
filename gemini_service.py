@@ -10,6 +10,7 @@ from datetime import datetime
 from typing import Tuple, Optional
 from dotenv import load_dotenv
 import google.generativeai as genai
+from timezone_utils import now_for_user, format_datetime_argentina
 
 # Cargar variables de entorno
 load_dotenv()
@@ -54,7 +55,7 @@ class GeminiService:
         Returns:
             str: Prompt formateado
         """
-        ahora = datetime.now().strftime('%Y-%m-%d %H:%M:%S')
+        ahora = format_datetime_argentina(now_for_user())
         # NOTE: solicitamos explícitamente los nombres de campo que la base de datos
         # espera. Excluimos campos gestionados por el sistema (chat_id, notificado,
         # username, id, version, recordatorio_original_id, es_version_actual,
@@ -149,7 +150,7 @@ Responde ÚNICAMENTE con el objeto JSON solicitado.
 
             # Validar que la fecha no haya pasado (solo para no recurrentes)
             es_recurrente = bool(json_data.get('es_recurrente', False))
-            if not es_recurrente and fecha_hora_obj <= datetime.now():
+            if not es_recurrente and fecha_hora_obj <= now_for_user():
                 return None, None, "La fecha y hora que entendí ya pasó. Por favor, intentá de nuevo.", None
 
             # Construir recurrence_data con los nombres que usa la base de datos
@@ -256,7 +257,7 @@ Responde SOLO con el mensaje, sin formato extra ni explicaciones.
         Returns:
             Tuple: (lista_de_recordatorios, error_msg)
         """
-        ahora = datetime.now().strftime('%Y-%m-%d %H:%M:%S')
+        ahora = format_datetime_argentina(now_for_user())
         
         prompt = f"""
 Fecha/hora actual: {ahora}
@@ -374,8 +375,8 @@ Respondé SOLO JSON.
         Returns:
             Tuple: (tarea, fecha_hora, error_msg, recurrence_data)
         """
-        ahora = datetime.now().strftime('%Y-%m-%d %H:%M:%S')
-        fecha_original_str = fecha_original.strftime('%Y-%m-%d %H:%M:%S')
+        ahora = format_datetime_argentina(now_for_user())
+        fecha_original_str = format_datetime_argentina(fecha_original)
         
         prompt = f"""
 Sos un asistente para editar recordatorios. El usuario quiere modificar un recordatorio existente.
@@ -466,7 +467,7 @@ Si no podés entender, respondé: {{"error": "no entendí la modificación, pod�
                     return None, None, "Error al interpretar la fecha.", None
 
             es_recurrente = bool(json_data.get('es_recurrente', False))
-            if not es_recurrente and fecha_hora_obj <= datetime.now():
+            if not es_recurrente and fecha_hora_obj <= now_for_user():
                 return None, None, "La fecha debe ser en el futuro. Intentá con una fecha posterior.", None
 
             recurrence_data = {
@@ -489,4 +490,110 @@ Si no podés entender, respondé: {{"error": "no entendí la modificación, pod�
         except Exception as e:
             logger.error(f"Error inesperado en parse_reminder_edit: {e}")
             return None, None, f"Hubo un error inesperado: {e}", None
+
+    async def classify_and_respond(self, texto_usuario: str) -> Tuple[str, bool]:
+        """
+        Clasifica el mensaje del usuario y genera una respuesta apropiada.
+        
+        Args:
+            texto_usuario: Texto del usuario
+        
+        Returns:
+            Tuple[str, bool]: (respuesta, es_recordatorio)
+                - respuesta: Mensaje de respuesta para el usuario
+                - es_recordatorio: True si es intención de crear recordatorio, False si es fuera de tema
+        """
+        prompt = f"""
+Sos un bot de recordatorios amigable. Tu ÚNICO propósito es ayudar a crear, editar y gestionar recordatorios.
+
+Texto del usuario: "{texto_usuario}"
+
+Clasificá este mensaje en una de estas categorías:
+
+1. RECORDATORIO: El usuario quiere crear, modificar o consultar un recordatorio
+   Ejemplos: "recuerdame comprar pan", "tengo que estudiar mañana", "agenda reunión el lunes", "recordatorio para las 3pm"
+
+2. SALUDO/CORTESIA: Saludo, despedida o cortesía relacionada con recordatorios
+   Ejemplos: "hola", "gracias", "chau", "buenas", "cómo estás"
+
+3. FUERA_DE_TEMA: Pregunta o solicitud NO relacionada con recordatorios
+   Ejemplos: "cuánto es 2+2", "dame una receta", "contame un chiste", "qué hora es", "cómo está el clima"
+
+Responde SOLO con un JSON:
+{{
+  "categoria": "RECORDATORIO" | "SALUDO" | "FUERA_DE_TEMA",
+  "respuesta": "mensaje apropiado para el usuario (si no es RECORDATORIO)"
+}}
+
+Si es RECORDATORIO, deja "respuesta" vacío ("").
+Si es SALUDO, responde de forma amigable pero breve y recordá tu propósito.
+Si es FUERA_DE_TEMA, responde cortésmente que solo podés ayudar con recordatorios.
+
+Responde SOLO el JSON, sin texto adicional.
+"""
+        
+        try:
+            response = await self.model.generate_content_async(prompt)
+            json_data = self._extract_json(response.text)
+            
+            if not json_data:
+                # Fallback: asumir que es intención de recordatorio
+                return "", True
+            
+            categoria = json_data.get('categoria', 'RECORDATORIO')
+            respuesta_bot = json_data.get('respuesta', '')
+            
+            if categoria == 'RECORDATORIO':
+                return "", True
+            elif categoria == 'SALUDO':
+                if not respuesta_bot:
+                    respuesta_bot = "¡Hola! 👋 Soy tu asistente de recordatorios. Escribime qué querés recordar y yo me encargo 😊"
+                return respuesta_bot, False
+            else:  # FUERA_DE_TEMA
+                if not respuesta_bot:
+                    respuesta_bot = "🤖 Disculpá, pero solo puedo ayudarte con recordatorios. ¿Querés que agende algo para vos?"
+                return respuesta_bot, False
+        
+        except Exception as e:
+            logger.error(f"Error en classify_and_respond: {e}")
+            # En caso de error, asumir que es recordatorio para no bloquear funcionalidad
+            return "", True
+
+    async def ask_for_time(self, tarea: str, fecha: str) -> str:
+        """
+        Genera un mensaje natural preguntando por la hora de un recordatorio.
+        
+        Args:
+            tarea: La tarea del recordatorio
+            fecha: La fecha del recordatorio
+        
+        Returns:
+            str: Mensaje preguntando la hora
+        """
+        prompt = f"""
+Sos un asistente amigable. El usuario quiere crear este recordatorio:
+
+Tarea: "{tarea}"
+Fecha: {fecha}
+
+Generá un mensaje BREVE (máximo 15 palabras) preguntando a qué hora quiere que se le recuerde.
+Debe ser natural, amigable y directo.
+
+Ejemplos de buen estilo:
+- "¿A qué hora querés que te recuerde?"
+- "Dale, ¿a qué hora te lo recuerdo?"
+- "Perfecto! ¿Qué hora te viene bien?"
+- "¿A qué hora necesitás el recordatorio?"
+
+Responde SOLO con el mensaje, sin formato extra.
+"""
+        
+        try:
+            response = await self.model.generate_content_async(prompt)
+            mensaje = response.text.strip().strip('"').strip("'")
+            return mensaje
+        except Exception as e:
+            logger.error(f"Error generando pregunta de hora: {e}")
+            return "¿A qué hora querés que te recuerde?"
+
 

@@ -9,6 +9,7 @@ from typing import List, Optional, Tuple
 from contextlib import contextmanager
 import mysql.connector
 from mysql.connector import pooling, Error
+from timezone_utils import to_argentina, to_utc, now_for_db
 
 logger = logging.getLogger(__name__)
 
@@ -130,15 +131,16 @@ class DatabaseManager:
             logger.info(f"Recordatorio {nuevo_id} creado para chat {chat_id}")
             return nuevo_id
     
-    def get_pending_reminders(self, chat_id: int) -> List[Tuple[int, str, datetime]]:
+    def get_upcoming_reminders(self, chat_id: int) -> List[Tuple[int, str, datetime]]:
         """
-        Obtiene todos los recordatorios pendientes de un usuario.
+        Obtiene los recordatorios futuros de un usuario (próximos 7 días).
         
         Args:
             chat_id: ID del chat de Telegram
         
         Returns:
-            List[Tuple]: Lista de (id, tarea, fecha_hora)
+            List[Tuple]: Lista de (id, tarea, fecha_hora_utc)
+            NOTA: fecha_hora está en UTC, debe ser convertida a Argentina para mostrar
         """
         with self.get_connection() as (conn, cursor):
             query = """
@@ -210,10 +212,11 @@ class DatabaseManager:
         
         Args:
             reminder_id: ID del recordatorio
-            chat_id: ID del chat (para validación)
+            chat_id: ID del chat (para seguridad)
         
         Returns:
-            Optional[Tuple]: (tarea, fecha_hora, contexto_original) o None si no existe
+            Tuple: (tarea, fecha_hora_utc, contexto_original) o None si no existe
+            NOTA: fecha_hora está en UTC, debe ser convertida a Argentina para mostrar
         """
         with self.get_connection() as (conn, cursor):
             query = """

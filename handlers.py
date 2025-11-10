@@ -8,6 +8,7 @@ import locale
 from datetime import datetime
 from telegram import Update, InlineKeyboardButton, InlineKeyboardMarkup
 from telegram.ext import ContextTypes, ConversationHandler
+from timezone_utils import to_utc, to_argentina, now_for_user, format_datetime_argentina
 
 logger = logging.getLogger(__name__)
 
@@ -86,8 +87,9 @@ class TelegramHandlers:
     async def create_reminder(self, update: Update, context: ContextTypes.DEFAULT_TYPE) -> int:
         """
         Maneja cualquier mensaje de texto para CREAR recordatorio(s).
-        Soporta hasta 3 recordatorios en un solo mensaje.
-        Si falta la hora, pregunta al usuario.
+        Primero clasifica si es sobre recordatorios o fuera de tema.
+        Soporta múltiples recordatorios en un solo mensaje.
+        Si falta la hora, pregunta al usuario de forma natural.
         
         Returns:
             int: Estado del ConversationHandler (ESPERANDO_HORA o ConversationHandler.END)
@@ -96,10 +98,22 @@ class TelegramHandlers:
         texto_usuario = update.message.text
         username = update.message.from_user.username
         
-        logger.info(f"Creando recordatorio(s) para {chat_id}: {texto_usuario}")
-        msg_temporal = await update.message.reply_text("Procesando tu solicitud...")
+        logger.info(f"Mensaje de {chat_id}: {texto_usuario}")
         
-        # Parsear con Gemini (ahora soporta múltiples recordatorios)
+        # PASO 1: Clasificar el mensaje
+        msg_temporal = await update.message.reply_text("🤔 Procesando...")
+        respuesta_dialogo, es_recordatorio = await self.gemini.classify_and_respond(texto_usuario)
+        
+        # Si NO es recordatorio (saludo o fuera de tema), responder y terminar
+        if not es_recordatorio:
+            await context.bot.edit_message_text(
+                chat_id=chat_id,
+                message_id=msg_temporal.message_id,
+                text=respuesta_dialogo
+            )
+            return ConversationHandler.END
+        
+        # PASO 2: Es un recordatorio, parsearlo
         recordatorios, error_msg = await self.gemini.parse_multiple_reminders(texto_usuario)
         
         if error_msg:
@@ -110,7 +124,7 @@ class TelegramHandlers:
             )
             return ConversationHandler.END
         
-        # Verificar si algún recordatorio no tiene hora
+        # PASO 3: Verificar si algún recordatorio no tiene hora
         recordatorios_sin_hora = [r for r in recordatorios if not r.get('hora_especificada', True)]
         
         if recordatorios_sin_hora:
@@ -118,17 +132,24 @@ class TelegramHandlers:
             context.user_data['recordatorios_pendientes'] = recordatorios
             context.user_data['username'] = username
             context.user_data['msg_temporal_id'] = msg_temporal.message_id
+            context.user_data['recordatorio_actual_index'] = 0
             
-            # Preguntar hora para el primer recordatorio sin hora
+            # Preguntar hora para el primer recordatorio sin hora de forma natural
             primer_recordatorio = recordatorios_sin_hora[0]
+            
+            # Generar mensaje personalizado preguntando la hora
+            mensaje_hora = await self.gemini.ask_for_time(
+                primer_recordatorio['tarea'],
+                primer_recordatorio['fecha']
+            )
             
             await context.bot.edit_message_text(
                 chat_id=chat_id,
                 message_id=msg_temporal.message_id,
                 text=f"📅 <b>Recordatorio:</b> {primer_recordatorio['tarea']}\n\n"
                      f"📆 <b>Fecha:</b> {primer_recordatorio['fecha']}\n\n"
-                     f"⏰ <b>¿A qué hora querés que te recuerde?</b>\n\n"
-                     f"Ejemplo: 10:30, 15:00, 9am",
+                     f"⏰ {mensaje_hora}\n\n"
+                     f"<i>Ejemplo: 10:30, 15:00, 9am</i>",
                 parse_mode="HTML"
             )
             
@@ -154,12 +175,13 @@ class TelegramHandlers:
         
         if not hora_parseada:
             await update.message.reply_text(
-                "❌ No pude entender esa hora.\n\n"
-                "Por favor, escribí la hora en un formato como:\n"
-                "• 10:30\n"
-                "• 15:00\n"
-                "• 9am\n"
-                "• 14:45"
+                "🤔 Mmm, no entendí esa hora.\n\n"
+                "Intentá con algo como:\n"
+                "• <i>10:30</i>\n"
+                "• <i>3pm</i>\n"
+                "• <i>15:00</i>\n"
+                "• <i>9 de la mañana</i>",
+                parse_mode="HTML"
             )
             return ESPERANDO_HORA
         
@@ -340,7 +362,7 @@ Responde SOLO con la hora en formato HH:MM:SS o "ERROR" si no podés entender.
         
         for recordatorio in recordatorios:
             try:
-                # Combinar fecha y hora
+                # Combinar fecha y hora (Gemini devuelve en hora Argentina)
                 fecha_str = recordatorio.get('fecha')
                 hora_str = recordatorio.get('hora', '00:00:00')
                 
@@ -351,6 +373,9 @@ Responde SOLO con la hora en formato HH:MM:SS o "ERROR" si no podés entender.
                 else:
                     fecha_hora_str = f"{fecha_str} {hora_str}"
                     fecha_hora_obj = datetime.strptime(fecha_hora_str, '%Y-%m-%d %H:%M:%S')
+                
+                # Convertir de hora Argentina a UTC para almacenar
+                fecha_hora_utc = to_utc(fecha_hora_obj)
                 
                 # Verificar si es recurrente
                 if recordatorio.get('es_recurrente'):
@@ -385,11 +410,11 @@ Responde SOLO con la hora en formato HH:MM:SS o "ERROR" si no podés entender.
                         'fecha_fin_recurrencia': None
                     }
                 
-                # Guardar en base de datos
+                # Guardar en base de datos (fecha_hora_utc está en UTC)
                 nuevo_id = self.db.create_reminder(
                     chat_id, 
                     recordatorio['tarea'], 
-                    fecha_hora_obj, 
+                    fecha_hora_utc, 
                     recurrence_data,
                     username
                 )
@@ -397,7 +422,7 @@ Responde SOLO con la hora en formato HH:MM:SS o "ERROR" si no podés entender.
                 creados.append({
                     'id': nuevo_id,
                     'tarea': recordatorio['tarea'],
-                    'fecha_hora': fecha_hora_obj,
+                    'fecha_hora': fecha_hora_obj,  # Guardar en Argentina para mostrar
                     'es_recurrente': recordatorio.get('es_recurrente', False),
                     'tipo_recurrencia': recordatorio.get('tipo_recurrencia')
                 })
@@ -513,10 +538,13 @@ Responde SOLO con la hora en formato HH:MM:SS o "ERROR" si no podés entender.
             
             # Mostrar solo recordatorios en curso (futuros)
             for job_id, tarea, fecha_hora in upcoming_jobs:
+                # Convertir de UTC (desde BD) a hora Argentina para mostrar
+                fecha_hora_arg = to_argentina(fecha_hora)
+                
                 # Truncar tarea para mostrar en botón
                 tarea_corta = (tarea[:30] + '...') if len(tarea) > 30 else tarea
                 message_text += f"📌 <b>{tarea}</b>\n"
-                message_text += f"📅 {fecha_hora.strftime('%A %d de %B - %H:%M hs')}\n"
+                message_text += f"📅 {fecha_hora_arg.strftime('%A %d de %B - %H:%M hs')}\n"
                 
                 keyboard.append([
                     InlineKeyboardButton(f"✏️ {tarea_corta}", callback_data=f"edit:{job_id}"),
@@ -686,8 +714,11 @@ Responde SOLO con la hora en formato HH:MM:SS o "ERROR" si no podés entender.
             
             tarea, fecha_hora, contexto_original = job
             
+            # Convertir fecha de UTC (desde BD) a hora Argentina para mostrar
+            fecha_hora_arg = to_argentina(fecha_hora)
+            
             # Verificar que sea un recordatorio futuro
-            if fecha_hora <= datetime.now():
+            if fecha_hora_arg <= now_for_user():
                 mensaje = (
                     "⚠️ <b>No se puede editar este recordatorio</b>\n\n"
                     "Solo podés editar recordatorios que aún no hayan vencido.\n\n"
@@ -707,7 +738,7 @@ Responde SOLO con la hora en formato HH:MM:SS o "ERROR" si no podés entender.
             mensaje = (
                 f"✏️ <b>Editando recordatorio:</b>\n"
                 f"<i>'{tarea}'</i>\n"
-                f"📅 {fecha_hora.strftime('%A %d de %B a las %H:%M hs')}\n\n"
+                f"📅 {fecha_hora_arg.strftime('%A %d de %B a las %H:%M hs')}\n\n"
                 f"💬 <b>Escribí qué querés cambiar</b>\n\n"
                 f"Podés hacer cambios incrementales:\n"
                 f"• <i>El examen era el martes no el lunes</i>\n"
@@ -780,7 +811,7 @@ Responde SOLO con la hora en formato HH:MM:SS o "ERROR" si no podés entender.
         
         # Validar que la nueva fecha sea futura (solo si no es recurrente)
         es_recurrente = recurrence_data and recurrence_data.get('tipo')
-        if not es_recurrente and fecha_hora_obj <= datetime.now():
+        if not es_recurrente and fecha_hora_obj <= now_for_user():
             await context.bot.edit_message_text(
                 chat_id=chat_id, 
                 message_id=msg_temporal.message_id,
@@ -790,11 +821,14 @@ Responde SOLO con la hora en formato HH:MM:SS o "ERROR" si no podés entender.
             return EDITANDO_RECORDATORIO
         
         try:
+            # Convertir de hora Argentina a UTC para almacenar
+            fecha_hora_utc = to_utc(fecha_hora_obj)
+            
             # Extraer nuevo contexto
             nuevo_contexto = recurrence_data.get('contexto_original') if recurrence_data else None
             
             # Actualizar con el nuevo contexto
-            self.db.update_reminder(old_job_id, chat_id, tarea, fecha_hora_obj, nuevo_contexto)
+            self.db.update_reminder(old_job_id, chat_id, tarea, fecha_hora_utc, nuevo_contexto)
             
             keyboard = [[InlineKeyboardButton("« Volver al Menú", callback_data="menu_principal")]]
             reply_markup = InlineKeyboardMarkup(keyboard)

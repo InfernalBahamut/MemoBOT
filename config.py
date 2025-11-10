@@ -38,6 +38,9 @@ class Config:
         # Scheduler
         self.SCHEDULER_INTERVAL = int(os.getenv("SCHEDULER_INTERVAL", "10"))
         
+        # Zona horaria
+        self.TIMEZONE = os.getenv("TIMEZONE", "America/Argentina/Buenos_Aires")
+        
         # Validación
         self._validate_required_vars()
     
