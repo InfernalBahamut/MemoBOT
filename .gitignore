@@ -54,3 +54,6 @@ Thumbs.db
 *.bak
 *.backup
 *.tar.gz
+
+# Testing/Validation (optional)
+test_setup.py

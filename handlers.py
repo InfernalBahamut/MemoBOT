@@ -825,12 +825,87 @@ Responde SOLO con la hora en formato HH:MM:SS o "ERROR" si no podés entender.
         fecha_original = context.user_data.get('job_original_fecha')
         contexto_original = context.user_data.get('job_original_contexto')
         
+        # Verificar si estamos esperando hora (modo edición con hora pendiente)
+        esperando_hora_edicion = context.user_data.get('esperando_hora_edicion', False)
+        
+        if esperando_hora_edicion:
+            # Estamos esperando que el usuario proporcione la hora
+            hora_parseada = await self._parsear_hora(texto_usuario)
+            
+            if not hora_parseada:
+                await update.message.reply_text(
+                    "🤔 Mmm, no entendí esa hora.\n\n"
+                    "Intentá con algo como:\n"
+                    "• <i>10:30</i>\n"
+                    "• <i>3pm</i>\n"
+                    "• <i>15:00</i>\n"
+                    "• <i>9 de la mañana</i>",
+                    parse_mode="HTML"
+                )
+                return EDITANDO_RECORDATORIO
+            
+            # Recuperar tarea y fecha temporal guardadas
+            tarea_temporal = context.user_data.get('tarea_temporal')
+            fecha_temporal_obj = context.user_data.get('fecha_temporal_obj')
+            nuevo_contexto = context.user_data.get('nuevo_contexto')
+            
+            if not tarea_temporal or not fecha_temporal_obj:
+                await update.message.reply_text("⚠️ Ocurrió un error. Intentá de nuevo desde /listar")
+                context.user_data.clear()
+                return ConversationHandler.END
+            
+            # Combinar fecha con hora parseada
+            try:
+                fecha_str = fecha_temporal_obj.strftime('%Y-%m-%d')
+                fecha_hora_str = f"{fecha_str} {hora_parseada}"
+                fecha_hora_obj = datetime.strptime(fecha_hora_str, '%Y-%m-%d %H:%M:%S')
+            except Exception as e:
+                logger.error(f"Error combinando fecha y hora: {e}")
+                await update.message.reply_text("⚠️ Error procesando la hora. Intentá de nuevo.")
+                return EDITANDO_RECORDATORIO
+            
+            # Validar fecha futura
+            if fecha_hora_obj <= now_for_user():
+                keyboard = [[InlineKeyboardButton("❌ Cancelar edición", callback_data="cancel_edit")]]
+                reply_markup = InlineKeyboardMarkup(keyboard)
+                await update.message.reply_text(
+                    "⚠️ <b>La fecha debe ser en el futuro.</b>\n\n💬 Intentá con una fecha posterior o cancelá:",
+                    parse_mode="HTML",
+                    reply_markup=reply_markup
+                )
+                return EDITANDO_RECORDATORIO
+            
+            # Ahora sí actualizar el recordatorio
+            try:
+                fecha_hora_utc = to_utc(fecha_hora_obj)
+                self.db.update_reminder(old_job_id, chat_id, tarea_temporal, fecha_hora_utc, nuevo_contexto)
+                
+                # Limpiar datos de edición
+                context.user_data.clear()
+                
+                keyboard = [[InlineKeyboardButton("« Volver al Menú", callback_data="menu_principal")]]
+                reply_markup = InlineKeyboardMarkup(keyboard)
+                
+                mensaje_confirmacion = (
+                    f"✅ <b>Recordatorio actualizado!</b>\n\n"
+                    f"📌 <b>Nuevo recordatorio:</b>\n"
+                    f"<i>'{tarea_temporal}'</i>\n\n"
+                    f"📅 <b>Nueva fecha:</b>\n{self._formatear_fecha_es(fecha_hora_obj, 'completo')}"
+                )
+                await update.message.reply_html(mensaje_confirmacion, reply_markup=reply_markup)
+                
+            except Exception as e:
+                logger.error(f"Error actualizando recordatorio: {e}")
+                keyboard = [[InlineKeyboardButton("« Volver al Menú", callback_data="menu_principal")]]
+                reply_markup = InlineKeyboardMarkup(keyboard)
+                await update.message.reply_html("Error al actualizar en la base de datos.", reply_markup=reply_markup)
+            
+            return ConversationHandler.END
+        
+        # Flujo normal (no estamos esperando hora)
         if not old_job_id or not tarea_original or not fecha_original:
             # Limpiar datos si faltan
-            context.user_data.pop('job_to_edit', None)
-            context.user_data.pop('job_original_tarea', None)
-            context.user_data.pop('job_original_fecha', None)
-            context.user_data.pop('job_original_contexto', None)
+            context.user_data.clear()
             
             await update.message.reply_text("⚠️ Ocurrió un error. Usá /listar y presioná el botón ✏️")
             return ConversationHandler.END
@@ -859,8 +934,43 @@ Responde SOLO con la hora en formato HH:MM:SS o "ERROR" si no podés entender.
             )
             return EDITANDO_RECORDATORIO
         
+        # VERIFICAR SI FALTA LA HORA (fecha_hora_obj tiene hora 00:00:00)
+        if fecha_hora_obj.hour == 0 and fecha_hora_obj.minute == 0 and fecha_hora_obj.second == 0:
+            # Verificar si el usuario realmente especificó una hora o si es por defecto
+            # Guardar datos temporales para después de obtener la hora
+            context.user_data['esperando_hora_edicion'] = True
+            context.user_data['tarea_temporal'] = tarea
+            context.user_data['fecha_temporal_obj'] = fecha_hora_obj
+            
+            # Extraer nuevo contexto
+            if recurrence_data and recurrence_data.get('contexto_original'):
+                nuevo_contexto = recurrence_data.get('contexto_original')
+            else:
+                nuevo_contexto = texto_usuario
+            
+            context.user_data['nuevo_contexto'] = nuevo_contexto
+            
+            # Preguntar la hora
+            mensaje_hora = await self.gemini.ask_for_time(tarea, fecha_hora_obj.strftime('%Y-%m-%d'))
+            
+            keyboard = [[InlineKeyboardButton("❌ Cancelar edición", callback_data="cancel_edit")]]
+            reply_markup = InlineKeyboardMarkup(keyboard)
+            
+            await context.bot.edit_message_text(
+                chat_id=chat_id,
+                message_id=msg_temporal.message_id,
+                text=f"📅 <b>Recordatorio:</b> {tarea}\n\n"
+                     f"📆 <b>Fecha:</b> {self._formatear_fecha_es(fecha_hora_obj, 'corto')}\n\n"
+                     f"⏰ {mensaje_hora}\n\n"
+                     f"<i>Ejemplo: 10:30, 15:00, 9am</i>",
+                parse_mode="HTML",
+                reply_markup=reply_markup
+            )
+            
+            return EDITANDO_RECORDATORIO
+        
         # Validar que la nueva fecha sea futura (solo si no es recurrente)
-        es_recurrente = recurrence_data and recurrence_data.get('tipo')
+        es_recurrente = recurrence_data and recurrence_data.get('tipo_recurrencia')
         if not es_recurrente and fecha_hora_obj <= now_for_user():
             # Crear botón de cancelar
             keyboard = [[InlineKeyboardButton("❌ Cancelar edición", callback_data="cancel_edit")]]
@@ -893,10 +1003,7 @@ Responde SOLO con la hora en formato HH:MM:SS o "ERROR" si no podés entender.
             self.db.update_reminder(old_job_id, chat_id, tarea, fecha_hora_utc, nuevo_contexto)
             
             # Limpiar datos de edición (solo cuando es exitoso)
-            context.user_data.pop('job_to_edit', None)
-            context.user_data.pop('job_original_tarea', None)
-            context.user_data.pop('job_original_fecha', None)
-            context.user_data.pop('job_original_contexto', None)
+            context.user_data.clear()
             
             keyboard = [[InlineKeyboardButton("« Volver al Menú", callback_data="menu_principal")]]
             reply_markup = InlineKeyboardMarkup(keyboard)
@@ -930,11 +1037,8 @@ Responde SOLO con la hora en formato HH:MM:SS o "ERROR" si no podés entender.
     
     async def cancel_edit(self, update: Update, context: ContextTypes.DEFAULT_TYPE) -> int:
         """Comando /cancelar o botón de 'Cancelar'."""
-        # Limpiar todos los datos de edición
-        context.user_data.pop('job_to_edit', None)
-        context.user_data.pop('job_original_tarea', None)
-        context.user_data.pop('job_original_fecha', None)
-        context.user_data.pop('job_original_contexto', None)
+        # Limpiar todos los datos de edición (incluyendo datos de hora pendiente)
+        context.user_data.clear()
         
         logger.info(f"Usuario {update.effective_chat.id} canceló la edición")
         

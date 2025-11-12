@@ -120,7 +120,6 @@ class ReminderScheduler:
             reminder_id: ID del recordatorio
             contexto_original: Texto original del usuario (opcional)
         """
-        loop = None
         try:
             # Extraer contexto inteligente usando Gemini (versión síncrona para threads)
             contexto_limpio = ""
@@ -151,57 +150,57 @@ class ReminderScheduler:
             keyboard = [[InlineKeyboardButton("« Volver al Menú", callback_data="menu_principal")]]
             reply_markup = InlineKeyboardMarkup(keyboard)
             
-            # Enviar el mensaje (de forma síncrona en este thread)
-            async def enviar():
-                await self.bot.send_message(
-                    chat_id=chat_id, 
-                    text=mensaje, 
-                    parse_mode="HTML",
-                    reply_markup=reply_markup
-                )
+            # Enviar el mensaje usando un nuevo event loop cada vez
+            self._enviar_mensaje_sync(chat_id, mensaje, reply_markup, reminder_id)
             
-            # Crear y ejecutar en un nuevo event loop
+        except Exception as e:
+            logger.error(f"Error enviando recordatorio {reminder_id}: {e}", exc_info=True)
+            # Fallback: enviar sin mensaje de humor ni formato HTML
+            mensaje_simple = f"🔔 ¡RECORDATORIO! 🔔\n\n📌 {tarea}"
+            
+            # Intentar enviar mensaje simple
+            try:
+                self._enviar_mensaje_sync(chat_id, mensaje_simple, None, reminder_id)
+            except Exception as e2:
+                logger.error(f"No se pudo enviar recordatorio {reminder_id} ni en fallback: {e2}")
+    
+    def _enviar_mensaje_sync(self, chat_id: int, texto: str, reply_markup, reminder_id: int):
+        """
+        Envía un mensaje de forma síncrona creando un nuevo event loop.
+        
+        Args:
+            chat_id: ID del chat
+            texto: Texto del mensaje
+            reply_markup: Teclado inline (opcional)
+            reminder_id: ID del recordatorio (para logging)
+        """
+        loop = None
+        try:
+            async def enviar():
+                if reply_markup:
+                    await self.bot.send_message(
+                        chat_id=chat_id,
+                        text=texto,
+                        parse_mode="HTML",
+                        reply_markup=reply_markup
+                    )
+                else:
+                    await self.bot.send_message(
+                        chat_id=chat_id,
+                        text=texto
+                    )
+            
+            # Crear un nuevo event loop para este hilo
             loop = asyncio.new_event_loop()
             asyncio.set_event_loop(loop)
             loop.run_until_complete(enviar())
             logger.info(f"Recordatorio {reminder_id} enviado a {chat_id}")
             
-        except Exception as e:
-            logger.error(f"Error enviando recordatorio {reminder_id}: {e}", exc_info=True)
-            # Fallback: enviar sin mensaje de humor ni formato HTML
-            mensaje = f"🔔 ¡RECORDATORIO! 🔔\n\n📌 {tarea}"
-            
-            # Intentar enviar con botón incluso en fallback
-            try:
-                keyboard = [[InlineKeyboardButton("« Volver al Menú", callback_data="menu_principal")]]
-                reply_markup = InlineKeyboardMarkup(keyboard)
-                
-                async def enviar_fallback():
-                    await self.bot.send_message(
-                        chat_id=chat_id, 
-                        text=mensaje,
-                        reply_markup=reply_markup
-                    )
-                
-                if loop is None:
-                    loop = asyncio.new_event_loop()
-                    asyncio.set_event_loop(loop)
-                loop.run_until_complete(enviar_fallback())
-            except Exception as e2:
-                logger.error(f"Error en fallback: {e2}")
-                # Si todo falla, enviar solo texto
-                try:
-                    async def enviar_simple():
-                        await self.bot.send_message(chat_id=chat_id, text=mensaje)
-                    
-                    if loop is None:
-                        loop = asyncio.new_event_loop()
-                        asyncio.set_event_loop(loop)
-                    loop.run_until_complete(enviar_simple())
-                except Exception as e3:
-                    logger.error(f"No se pudo enviar recordatorio {reminder_id} ni siquiera en fallback: {e3}")
         finally:
-            # Cerrar el loop solo si existe y no está cerrado
-            if loop is not None and not loop.is_closed():
-                loop.close()
+            # Siempre cerrar el loop después de usarlo
+            if loop is not None:
+                try:
+                    loop.close()
+                except Exception as e:
+                    logger.warning(f"Error cerrando event loop: {e}")
 
