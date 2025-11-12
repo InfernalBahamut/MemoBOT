@@ -48,15 +48,13 @@ Thumbs.db
 *.db
 *.sqlite
 *.sqlite3
-*.sql
 
 # Backup files
 *.bak
 *.backup
 *.tar.gz
 
-# Testing/Validation (optional)
+# archivos especificos
 test_setup.py
-
-*.INFORME_ACADEMICO.md
-*.INFORME_TECNICO.md
+INFORME_ACADEMICO.md
+INFORME_TECNICO.md
