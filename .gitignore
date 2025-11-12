@@ -57,3 +57,6 @@ Thumbs.db
 
 # Testing/Validation (optional)
 test_setup.py
+
+*.INFORME_ACADEMICO.md
+*.INFORME_TECNICO.md
